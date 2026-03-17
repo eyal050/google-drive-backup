@@ -1,0 +1,268 @@
+# src/gdrive_backup/cli.py
+"""CLI entry point for gdrive-backup."""
+
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import click
+import yaml
+
+from gdrive_backup import __version__
+from gdrive_backup.auth import authenticate, build_drive_service, AuthError
+from gdrive_backup.classifier import FileClassifier
+from gdrive_backup.config import Config, ConfigError, load_config, DEFAULT_CONTROL_DIR
+from gdrive_backup.drive_client import DriveClient
+from gdrive_backup.git_manager import GitManager
+from gdrive_backup.logging_setup import setup_logging
+from gdrive_backup.mirror_manager import MirrorManager
+from gdrive_backup.sync_engine import SyncEngine
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_config_path(config_path: Optional[str]) -> Path:
+    if config_path:
+        return Path(config_path)
+    return DEFAULT_CONTROL_DIR / "config.yaml"
+
+
+def _resolve_control_dir(config_path: Optional[str]) -> Path:
+    if config_path:
+        return Path(config_path).parent
+    return DEFAULT_CONTROL_DIR
+
+
+def _build_engine(config: Config) -> SyncEngine:
+    """Build a SyncEngine from a validated config."""
+    creds = authenticate(config.auth_method, config.credentials_file, config.token_file)
+    service = build_drive_service(creds)
+    drive_client = DriveClient(service)
+    git_manager = GitManager.init_repo(config.git_repo_path)
+    mirror_manager = MirrorManager(config.mirror_path)
+    classifier = FileClassifier()
+
+    return SyncEngine(
+        drive_client=drive_client,
+        git_manager=git_manager,
+        mirror_manager=mirror_manager,
+        classifier=classifier,
+        state_file=config.state_file,
+        max_file_size_mb=config.max_file_size_mb,
+        include_shared=config.include_shared,
+        folder_ids=config.folder_ids,
+    )
+
+
+def _load_state_file(state_path: Path) -> Optional[dict]:
+    if state_path.exists():
+        try:
+            return json.loads(state_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+@click.group()
+@click.version_option(version=__version__)
+@click.pass_context
+def main(ctx):
+    """Google Drive Backup — back up your Drive to git + mirror."""
+    ctx.ensure_object(dict)
+
+
+@main.command()
+@click.option("--config", "config_path", default=None, help="Config file path")
+@click.pass_context
+def init(ctx, config_path):
+    """Set up a new backup configuration."""
+    control_dir = _resolve_control_dir(config_path)
+    control_dir.mkdir(parents=True, exist_ok=True)
+    (control_dir / "logs").mkdir(exist_ok=True)
+
+    config_path = control_dir / "config.yaml"
+
+    if config_path.exists():
+        click.echo(f"Config already exists at {config_path}")
+        if not click.confirm("Overwrite?"):
+            return
+
+    # Auth method
+    auth_method = click.prompt(
+        "Authentication method",
+        type=click.Choice(["oauth", "service_account"]),
+        default="oauth",
+    )
+
+    # Credentials file
+    creds_prompt = "Path to credentials JSON file"
+    creds_input = click.prompt(creds_prompt, default=str(control_dir / "credentials.json"))
+    creds_path = Path(creds_input).expanduser()
+
+    if not creds_path.exists():
+        click.echo(f"Note: Place your credentials file at {creds_path}")
+
+    # Backup paths
+    git_repo_path = click.prompt(
+        "Git repo path (for text files)",
+        default=str(Path.home() / "gdrive-backup-repo"),
+    )
+    mirror_path = click.prompt(
+        "Mirror path (for binary files)",
+        default=str(Path.home() / "gdrive-backup-mirror"),
+    )
+
+    # Write config
+    config_data = {
+        "auth": {
+            "method": auth_method,
+            "credentials_file": creds_path.name if creds_path.parent == control_dir else str(creds_path),
+            "token_file": "token.json",
+        },
+        "backup": {
+            "git_repo_path": git_repo_path,
+            "mirror_path": mirror_path,
+        },
+        "scope": {
+            "include_shared": False,
+            "folder_ids": [],
+        },
+        "sync": {
+            "state_file": "state.json",
+        },
+        "max_file_size_mb": 0,
+        "logging": {
+            "max_size_mb": 10,
+            "max_files": 5,
+            "default_level": "info",
+        },
+        "daemon": {
+            "poll_interval": 300,
+        },
+    }
+
+    with open(config_path, "w") as f:
+        yaml.dump(config_data, f, default_flow_style=False)
+    os.chmod(config_path, 0o600)
+
+    # Initialize git repo
+    git_path = Path(git_repo_path).expanduser()
+    GitManager.init_repo(git_path)
+
+    # Create mirror directory
+    Path(mirror_path).expanduser().mkdir(parents=True, exist_ok=True)
+
+    click.echo(f"\nSetup complete!")
+    click.echo(f"  Config: {config_path}")
+    click.echo(f"  Git repo: {git_path}")
+    click.echo(f"  Mirror: {mirror_path}")
+    click.echo(f"\nTo start your first backup, run: gdrive-backup run")
+
+
+@main.command()
+@click.option("--config", "config_path", default=None, help="Config file path")
+@click.option("-v", "--verbose", is_flag=True, help="Increase log verbosity")
+@click.option("--debug", is_flag=True, help="Maximum log verbosity")
+@click.option("-q", "--quiet", is_flag=True, help="Suppress console output")
+@click.pass_context
+def run(ctx, config_path, verbose, debug, quiet):
+    """Run a single backup."""
+    # Determine console log level
+    if quiet:
+        console_level = "ERROR"
+    elif debug:
+        console_level = "DEBUG"
+    elif verbose:
+        console_level = "INFO"
+    else:
+        console_level = None  # Use config default
+
+    resolved_config_path = _resolve_config_path(config_path)
+    control_dir = _resolve_control_dir(config_path)
+
+    try:
+        config = load_config(str(resolved_config_path), str(control_dir))
+    except ConfigError as e:
+        click.echo(f"Config error: {e}", err=True)
+        sys.exit(2)
+
+    setup_logging(
+        config.log_dir,
+        config.log_max_size_mb,
+        config.log_max_files,
+        config.log_default_level,
+        console_level,
+    )
+
+    try:
+        engine = _build_engine(config)
+        stats = engine.run()
+        click.echo(f"Backup complete: {stats.summary()}")
+        sys.exit(1 if stats.failed > 0 else 0)
+    except AuthError as e:
+        click.echo(f"Authentication error: {e}", err=True)
+        sys.exit(2)
+    except Exception as e:
+        logger.exception(f"Backup failed: {e}")
+        click.echo(f"Backup failed: {e}", err=True)
+        sys.exit(2)
+
+
+@main.command()
+@click.option("--config", "config_path", default=None, help="Config file path")
+@click.pass_context
+def status(ctx, config_path):
+    """Show backup status."""
+    resolved_config_path = _resolve_config_path(config_path)
+    control_dir = _resolve_control_dir(config_path)
+
+    try:
+        config = load_config(str(resolved_config_path), str(control_dir))
+    except ConfigError:
+        # Try to load state directly
+        state_path = control_dir / "state.json"
+        state = _load_state_file(state_path)
+        if not state:
+            click.echo("No backup has been run yet.")
+            return
+        config = None
+
+    state_path = config.state_file if config else control_dir / "state.json"
+    state = _load_state_file(state_path)
+
+    if not state:
+        click.echo("No backup has been run yet.")
+        return
+
+    click.echo(f"Last run:    {state.get('last_run', 'unknown')}")
+    click.echo(f"Status:      {state.get('last_run_status', 'unknown')}")
+    click.echo(f"Files tracked: {len(state.get('file_cache', {}))}")
+    click.echo(f"Change token:  {state.get('start_page_token', 'none')[:20]}...")
+
+
+@main.command()
+@click.option("--config", "config_path", default=None, help="Config file path")
+@click.pass_context
+def config(ctx, config_path):
+    """Show current configuration."""
+    resolved_config_path = _resolve_config_path(config_path)
+
+    if not resolved_config_path.exists():
+        click.echo(f"No config file found at {resolved_config_path}")
+        click.echo("Run 'gdrive-backup init' to create one.")
+        return
+
+    click.echo(f"Config file: {resolved_config_path}")
+    click.echo("---")
+    click.echo(resolved_config_path.read_text())
+
+
+@main.command()
+@click.pass_context
+def daemon(ctx):
+    """Start continuous backup mode (stub — implemented in daemon module)."""
+    click.echo("Daemon mode not yet implemented.", err=True)
+    sys.exit(2)
