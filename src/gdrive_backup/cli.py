@@ -261,8 +261,42 @@ def config(ctx, config_path):
 
 
 @main.command()
+@click.option("--config", "config_path", default=None, help="Config file path")
 @click.pass_context
-def daemon(ctx):
-    """Start continuous backup mode (stub — implemented in daemon module)."""
-    click.echo("Daemon mode not yet implemented.", err=True)
-    sys.exit(2)
+def daemon(ctx, config_path):
+    """Start continuous backup mode."""
+    config_path = _resolve_config_path(config_path)
+    control_dir = _resolve_control_dir(config_path)
+
+    try:
+        config = load_config(str(config_path), str(control_dir))
+    except ConfigError as e:
+        click.echo(f"Config error: {e}", err=True)
+        sys.exit(2)
+
+    setup_logging(
+        config.log_dir,
+        config.log_max_size_mb,
+        config.log_max_files,
+        config.log_default_level,
+        None,
+    )
+
+    try:
+        engine = _build_engine(config)
+    except AuthError as e:
+        click.echo(f"Authentication error: {e}", err=True)
+        sys.exit(2)
+
+    from gdrive_backup.daemon import Daemon
+    pid_file = config.control_dir / "daemon.pid"
+    d = Daemon(engine, poll_interval=config.poll_interval, pid_file=pid_file)
+
+    click.echo(f"Starting daemon (poll interval: {config.poll_interval}s)")
+    click.echo("Press Ctrl+C to stop")
+    try:
+        d.run()
+    except Exception as e:
+        logger.exception(f"Daemon failed: {e}")
+        click.echo(f"Daemon failed: {e}", err=True)
+        sys.exit(2)
