@@ -1,6 +1,7 @@
 # tests/test_config.py
 """Tests for configuration loading and validation."""
 
+import logging
 import os
 import stat
 from pathlib import Path
@@ -87,7 +88,6 @@ class TestValidation:
 class TestConfigPermissions:
     def test_warns_on_open_permissions(self, config_file, control_dir, caplog):
         os.chmod(config_file, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-        import logging
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger="gdrive_backup.config"):
             load_config(str(config_file), str(control_dir))
         assert any("permission" in r.message.lower() for r in caplog.records)
