@@ -9,6 +9,12 @@ build/
 .venv/
 venv/
 
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+test_results.txt
+
 # IDE
 .idea/
 .vscode/
