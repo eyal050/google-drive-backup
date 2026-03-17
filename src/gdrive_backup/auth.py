@@ -1,12 +1,10 @@
 # src/gdrive_backup/auth.py
 """OAuth 2.0 and service account authentication for Google Drive API."""
 
-import json
 import logging
 import os
 import stat
 from pathlib import Path
-from typing import Optional
 
 from google.auth.credentials import Credentials
 from google.auth.transport.requests import Request
