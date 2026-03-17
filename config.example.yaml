@@ -1,0 +1,35 @@
+# Google Drive Backup Configuration
+# Copy to ~/.gdrive-backup/config.yaml and edit
+
+# Authentication
+auth:
+  method: oauth  # "oauth" or "service_account"
+  credentials_file: credentials.json  # Relative to ~/.gdrive-backup/
+  token_file: token.json  # Relative to ~/.gdrive-backup/
+
+# Backup targets
+backup:
+  git_repo_path: ~/gdrive-backup-repo
+  mirror_path: ~/gdrive-backup-mirror
+
+# What to back up
+scope:
+  include_shared: false
+  folder_ids: []  # Empty = entire Drive
+
+# Sync settings
+sync:
+  state_file: state.json  # Relative to ~/.gdrive-backup/
+
+# File size limit in MB (0 = no limit)
+max_file_size_mb: 0
+
+# Logging
+logging:
+  max_size_mb: 10
+  max_files: 5
+  default_level: info  # debug, info, warning, error
+
+# Daemon mode
+daemon:
+  poll_interval: 300  # Seconds between checks
