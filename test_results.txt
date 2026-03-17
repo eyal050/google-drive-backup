@@ -1,0 +1,21 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-9.0.2, pluggy-1.6.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/eyal/repos/google-drive-backup/.worktrees/implement
+configfile: pyproject.toml
+plugins: cov-7.0.0, mock-3.12.0, asyncio-1.3.0
+asyncio: mode=strict, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 10 items
+
+tests/test_config.py::TestLoadConfig::test_load_valid_config PASSED      [ 10%]
+tests/test_config.py::TestLoadConfig::test_load_missing_file_raises PASSED [ 20%]
+tests/test_config.py::TestLoadConfig::test_load_invalid_yaml_raises PASSED [ 30%]
+tests/test_config.py::TestPathResolution::test_auth_paths_resolve_relative_to_control_dir PASSED [ 40%]
+tests/test_config.py::TestPathResolution::test_backup_paths_expand_tilde PASSED [ 50%]
+tests/test_config.py::TestValidation::test_invalid_auth_method_raises PASSED [ 60%]
+tests/test_config.py::TestValidation::test_negative_max_file_size_raises PASSED [ 70%]
+tests/test_config.py::TestValidation::test_invalid_log_level_raises PASSED [ 80%]
+tests/test_config.py::TestValidation::test_negative_poll_interval_raises PASSED [ 90%]
+tests/test_config.py::TestConfigPermissions::test_warns_on_open_permissions PASSED [100%]
+
+============================== 10 passed in 0.04s ==============================
