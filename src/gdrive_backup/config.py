@@ -2,7 +2,6 @@
 """Configuration loading, validation, and path resolution."""
 
 import logging
-import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,12 +104,12 @@ def _check_permissions(path: Path) -> None:
 
 def _validate_and_resolve(raw: dict, control_dir: Path) -> Config:
     """Validate raw config dict and resolve paths."""
-    auth = raw.get("auth", {})
-    backup = raw.get("backup", {})
-    scope = raw.get("scope", {})
-    sync = raw.get("sync", {})
-    logging_cfg = raw.get("logging", {})
-    daemon = raw.get("daemon", {})
+    auth = raw.get("auth") or {}
+    backup = raw.get("backup") or {}
+    scope = raw.get("scope") or {}
+    sync = raw.get("sync") or {}
+    logging_cfg = raw.get("logging") or {}
+    daemon = raw.get("daemon") or {}
 
     # Auth method
     auth_method = auth.get("method", "oauth")
@@ -142,6 +141,10 @@ def _validate_and_resolve(raw: dict, control_dir: Path) -> Config:
     # Logging
     log_max_size_mb = logging_cfg.get("max_size_mb", 10)
     log_max_files = logging_cfg.get("max_files", 5)
+    if not isinstance(log_max_size_mb, (int, float)) or log_max_size_mb <= 0:
+        raise ConfigError("logging.max_size_mb must be a positive number")
+    if not isinstance(log_max_files, (int, float)) or log_max_files <= 0:
+        raise ConfigError("logging.max_files must be a positive number")
     log_default_level = logging_cfg.get("default_level", "info")
     if log_default_level not in VALID_LOG_LEVELS:
         raise ConfigError(
