@@ -10,6 +10,36 @@ import pytest
 from gdrive_backup.classifier import FileClassifier, FileType
 from gdrive_backup.drive_client import DriveFile, DriveChange
 from gdrive_backup.sync_engine import SyncEngine, SyncStats, SyncError
+from gdrive_backup.sync_engine import DryRunSource, DryRunReport
+
+
+# ---------------------------------------------------------------------------
+# Module-level fixtures for dry-run tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def mock_drive_client():
+    clf = MagicMock()
+    return clf
+
+
+@pytest.fixture
+def sync_engine(mock_drive_client, tmp_path):
+    mock_git = MagicMock()
+    mock_mirror = MagicMock()
+    mock_classifier = MagicMock()
+    mock_classifier.classify_by_mime.side_effect = lambda mime: (
+        FileType.TEXT if mime.startswith("text/") else FileType.BINARY
+    )
+    state_file = tmp_path / "state.json"
+    return SyncEngine(
+        drive_client=mock_drive_client,
+        git_manager=mock_git,
+        mirror_manager=mock_mirror,
+        classifier=mock_classifier,
+        state_file=state_file,
+        max_file_size_mb=0,
+    )
 
 
 def _make_drive_file(
@@ -217,3 +247,86 @@ class TestSyncEngine:
         stats = engine.run_incremental()
 
         mock_git.move_file.assert_called_once_with("old_folder/test.txt", "new_folder/test.txt")
+
+
+# ---------------------------------------------------------------------------
+# Dry-run tests
+# ---------------------------------------------------------------------------
+
+def test_run_dry_drive_api(sync_engine, mock_drive_client):
+    """run_dry() uses Drive API when available."""
+    mock_drive_client.list_all_files.return_value = [
+        DriveFile(id="1", name="notes.txt", mime_type="text/plain",
+                  size=1000, md5=None, modified_time=None, parents=[]),
+        DriveFile(id="2", name="photo.jpg", mime_type="image/jpeg",
+                  size=5000, md5=None, modified_time=None, parents=[]),
+    ]
+    report = sync_engine.run_dry(
+        git_repo_path="/tmp/repo",
+        mirror_path="/tmp/mirror",
+        auth_method="oauth",
+        max_file_size_mb=0,
+        github_repo="alice/backup",
+    )
+    assert report.source == DryRunSource.DRIVE_API
+    assert report.text_file_count == 1
+    assert report.binary_file_count == 1
+    assert report.text_size_bytes == 1000
+    assert report.binary_size_bytes == 5000
+    assert report.sizes_available is True
+    assert report.github_repo == "alice/backup"
+
+
+def test_run_dry_fallback_to_state(sync_engine, mock_drive_client, tmp_path):
+    """run_dry() falls back to state file when Drive API fails."""
+    mock_drive_client.list_all_files.side_effect = Exception("auth failed")
+
+    # Pre-populate state file with a cache entry
+    state = {
+        "file_cache": {
+            "f1": {"type": "text", "mime": "text/plain", "size": 2000, "local_path": "a.txt"},
+            "f2": {"type": "binary", "mime": "image/jpeg", "size": 8000, "local_path": "b.jpg"},
+        }
+    }
+    sync_engine._state_file.write_text(json.dumps(state))
+
+    report = sync_engine.run_dry(
+        git_repo_path="/tmp/repo",
+        mirror_path="/tmp/mirror",
+        auth_method="oauth",
+        max_file_size_mb=0,
+    )
+    assert report.source == DryRunSource.LOCAL_STATE
+    assert report.text_file_count == 1
+    assert report.binary_file_count == 1
+    assert report.text_size_bytes == 2000
+
+
+def test_run_dry_no_state_no_auth_raises(sync_engine, mock_drive_client):
+    """run_dry() raises SyncError when both API and state are unavailable."""
+    mock_drive_client.list_all_files.side_effect = Exception("auth failed")
+    with pytest.raises(SyncError, match="no local state exists"):
+        sync_engine.run_dry(
+            git_repo_path="/tmp/repo",
+            mirror_path="/tmp/mirror",
+            auth_method="oauth",
+            max_file_size_mb=0,
+        )
+
+
+def test_run_dry_sizes_unavailable_for_old_state(sync_engine, mock_drive_client, tmp_path):
+    """sizes_available=False when state cache lacks size field."""
+    mock_drive_client.list_all_files.side_effect = Exception("auth failed")
+    state = {
+        "file_cache": {
+            "f1": {"type": "text", "mime": "text/plain", "local_path": "a.txt"},  # no size
+        }
+    }
+    sync_engine._state_file.write_text(json.dumps(state))
+    report = sync_engine.run_dry(
+        git_repo_path="/tmp/repo",
+        mirror_path="/tmp/mirror",
+        auth_method="oauth",
+        max_file_size_mb=0,
+    )
+    assert report.sizes_available is False
