@@ -141,6 +141,56 @@ class GitManager:
         diff = self._repo.index.diff("HEAD")
         return len(diff) > 0
 
+    def set_remote(self, name: str, url: str) -> None:
+        """Add a remote or update its URL if it already exists."""
+        try:
+            remote = self._repo.remote(name)
+            if remote.url != url:
+                self._repo.delete_remote(remote)
+                self._repo.create_remote(name, url)
+                logger.debug(f"Updated remote '{name}' URL")
+            else:
+                logger.debug(f"Remote '{name}' URL unchanged")
+        except ValueError:
+            self._repo.create_remote(name, url)
+            logger.debug(f"Added remote '{name}'")
+
+    def remove_remote(self, name: str) -> None:
+        """Remove a remote if it exists; silently does nothing if absent."""
+        try:
+            remote = self._repo.remote(name)
+            self._repo.delete_remote(remote)
+            logger.debug(f"Removed remote '{name}'")
+        except ValueError:
+            pass  # already absent
+
+    def push(self, remote: str = "origin", branch: str = "main") -> None:
+        """Push HEAD to remote/branch.
+
+        Args:
+            remote: Name of the git remote.
+            branch: Remote branch name to push to (HEAD:refs/heads/{branch}).
+
+        Raises:
+            GitError: If the remote does not exist or push fails.
+        """
+        try:
+            r = self._repo.remote(remote)
+        except ValueError:
+            raise GitError(f"Remote '{remote}' not found")
+
+        refspec = f"HEAD:refs/heads/{branch}"
+        try:
+            push_infos = r.push(refspec=refspec)
+        except Exception as e:
+            raise GitError(f"Push to '{remote}/{branch}' failed: {e}") from e
+
+        for info in push_infos:
+            if info.flags & info.ERROR:
+                raise GitError(f"Push to '{remote}/{branch}' failed: {info.summary}")
+
+        logger.info(f"Pushed HEAD to {remote}/{branch}")
+
     def _validate_path(self, relative_path: str) -> None:
         """Validate that a path doesn't escape the repo root."""
         resolved = (self._path / relative_path).resolve()
