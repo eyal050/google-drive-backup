@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,7 @@ from gdrive_backup.auth import authenticate, build_drive_service, AuthError
 from gdrive_backup.classifier import FileClassifier
 from gdrive_backup.config import Config, ConfigError, load_config, DEFAULT_CONTROL_DIR
 from gdrive_backup.drive_client import DriveClient
-from gdrive_backup.git_manager import GitManager
+from gdrive_backup.git_manager import GitManager, GitError
 from gdrive_backup.logging_setup import setup_logging
 from gdrive_backup.mirror_manager import MirrorManager
 from gdrive_backup.sync_engine import SyncEngine, DryRunReport, DryRunSource
@@ -197,6 +198,18 @@ def init(ctx, config_path):
     click.echo(f"\nTo start your first backup, run: gdrive-backup run")
 
 
+def _resolve_pat(config) -> Optional[str]:
+    """Resolve PAT from env var (priority) or config value."""
+    return os.environ.get("GITHUB_PAT") or config.github.pat or None
+
+
+def _resolve_repo_name(config) -> str:
+    """Return timestamped name in e2e mode, else config.github.repo."""
+    if config.github.e2e_output_mode is not None:
+        return datetime.now(timezone.utc).strftime("%d-%m-%Y-%H-%M") + "_gdrive-backup"
+    return config.github.repo
+
+
 def _format_bytes(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
@@ -281,6 +294,40 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
             _print_dry_run_report(report)
             return
         stats = engine.run()
+
+        # GitHub push (skipped when --dry-run; dry_run branch already returned above)
+        if config.github and config.github.enabled:
+            pat = _resolve_pat(config)
+            if not pat:
+                click.echo("GitHub push skipped: no PAT found (set GITHUB_PAT or github.pat in config)", err=True)
+            else:
+                repo_name = _resolve_repo_name(config)
+                remote_branch = repo_name if config.github.e2e_output_mode == "new_branch" else "main"
+                try:
+                    mgr = GithubManager(
+                        pat,
+                        config.github.owner,
+                        repo_name,
+                        config.github.private,
+                        config.github.auto_create,
+                    )
+                    mgr.validate_pat()
+                    if config.github.e2e_output_mode == "new_branch":
+                        mgr.ensure_branch_exists(branch=repo_name, base_branch="main")
+                    else:
+                        mgr.ensure_repo_exists()
+                    auth_url = mgr.get_authenticated_remote_url()
+                    try:
+                        engine.git_manager.set_remote("origin", auth_url)
+                        engine.git_manager.push(remote="origin", branch=remote_branch)
+                        logger.info(f"Pushed to {config.github.owner}/{repo_name}")
+                    except GitError as push_err:
+                        logger.error(f"GitHub push failed: {push_err}")
+                    finally:
+                        engine.git_manager.remove_remote("origin")
+                except GithubError as e:
+                    logger.error(f"GitHub error: {e}")
+
         click.echo(f"Backup complete: {stats.summary()}")
         sys.exit(1 if stats.failed > 0 else 0)
     except AuthError as e:

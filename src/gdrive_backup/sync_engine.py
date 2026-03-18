@@ -94,6 +94,11 @@ class SyncEngine:
         self._state: dict = {}
         self._file_cache: dict = {}
 
+    @property
+    def git_manager(self) -> GitManager:
+        """Expose the underlying GitManager for post-run operations (e.g. push)."""
+        return self._git
+
     def run(self) -> SyncStats:
         """Run a backup — auto-selects full scan or incremental."""
         self._load_state()
