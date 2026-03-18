@@ -124,6 +124,49 @@ def test_dry_run_skips_github_push(tmp_path, fake_config_file):
     mock_gh.assert_not_called()
 
 
+def test_init_github_prompts_saved_to_config(tmp_path):
+    """GitHub prompts during init are written to config file."""
+    runner = CliRunner()
+    input_lines = "\n".join([
+        "oauth",           # auth method
+        "",                # credentials file (default)
+        str(tmp_path / "repo"),   # git repo path
+        str(tmp_path / "mirror"), # mirror path
+        "y",               # enable github
+        "alice",           # owner
+        "my-backup",       # repo
+        "y",               # private
+        "y",               # auto_create
+        "",                # PAT (blank = use env var)
+    ])
+    result = runner.invoke(
+        main, ["init", "--config", str(tmp_path / "config.yaml")],
+        input=input_lines,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    config_text = (tmp_path / "config.yaml").read_text()
+    assert "github" in config_text
+    assert "alice" in config_text
+    assert "my-backup" in config_text
+
+
+def test_init_github_skipped_when_declined(tmp_path):
+    """Saying 'n' to GitHub skips the github section."""
+    runner = CliRunner()
+    input_lines = "\n".join([
+        "oauth", "", str(tmp_path / "repo"), str(tmp_path / "mirror"), "n",
+    ])
+    result = runner.invoke(
+        main, ["init", "--config", str(tmp_path / "config.yaml")],
+        input=input_lines,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    config_text = (tmp_path / "config.yaml").read_text()
+    assert "github:" not in config_text
+
+
 def test_dry_run_sizes_unknown_shows_message(tmp_path, fake_config_file):
     """When sizes_available=False, output includes 'size unknown'."""
     runner = CliRunner()
