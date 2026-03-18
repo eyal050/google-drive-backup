@@ -30,3 +30,6 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+
+# E2E testing
+e2e_config*.yaml

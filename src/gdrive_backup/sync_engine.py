@@ -7,6 +7,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,28 @@ logger = logging.getLogger(__name__)
 
 class SyncError(Exception):
     """Raised when sync fails fatally."""
+
+
+class DryRunSource(Enum):
+    DRIVE_API = "drive_api"
+    LOCAL_STATE = "local_state"
+
+
+@dataclass
+class DryRunReport:
+    """Report produced by a dry run — no files are written."""
+    source: DryRunSource
+    text_file_count: int
+    binary_file_count: int
+    text_size_bytes: int
+    binary_size_bytes: int
+    sizes_available: bool        # False if state cache lacked size fields
+    git_repo_path: str
+    mirror_path: str
+    auth_method: str
+    include_shared: bool
+    max_file_size_mb: int
+    github_repo: Optional[str]   # from config — not validated against GitHub
 
 
 @dataclass
@@ -70,6 +93,11 @@ class SyncEngine:
         self._folder_ids = folder_ids or []
         self._state: dict = {}
         self._file_cache: dict = {}
+
+    @property
+    def git_manager(self) -> GitManager:
+        """Expose the underlying GitManager for post-run operations (e.g. push)."""
+        return self._git
 
     def run(self) -> SyncStats:
         """Run a backup — auto-selects full scan or incremental."""
@@ -159,6 +187,75 @@ class SyncEngine:
         logger.info(f"Incremental sync complete: {stats.summary()}")
         return stats
 
+    def run_dry(
+        self,
+        git_repo_path: str,
+        mirror_path: str,
+        auth_method: str,
+        max_file_size_mb: int,
+        github_repo: Optional[str] = None,
+    ) -> DryRunReport:
+        """Enumerate Drive files and return counts/sizes without writing anything.
+
+        Falls back to local state cache if Drive API is unavailable.
+        Raises SyncError if both are unavailable.
+        """
+        self._load_state()
+
+        text_count = binary_count = 0
+        text_bytes = binary_bytes = 0
+        source = DryRunSource.DRIVE_API
+        sizes_available = True
+
+        try:
+            for drive_file in self._drive.list_all_files(
+                include_shared=self._include_shared,
+                folder_ids=self._folder_ids if self._folder_ids else None,
+            ):
+                if drive_file.should_skip:
+                    continue
+                file_type = self._classifier.classify_by_mime(drive_file.mime_type)
+                size = drive_file.size or 0
+                if file_type == FileType.TEXT:
+                    text_count += 1
+                    text_bytes += size
+                else:
+                    binary_count += 1
+                    binary_bytes += size
+        except Exception as e:
+            logger.warning(f"Drive API unavailable for dry run, falling back to state: {e}")
+            source = DryRunSource.LOCAL_STATE
+            if not self._file_cache:
+                raise SyncError(
+                    "Cannot enumerate files: auth failed and no local state exists"
+                )
+            for entry in self._file_cache.values():
+                raw_size = entry.get("size")
+                if raw_size is None:
+                    sizes_available = False
+                    raw_size = 0
+                if entry.get("type") == "text":
+                    text_count += 1
+                    text_bytes += raw_size
+                else:
+                    binary_count += 1
+                    binary_bytes += raw_size
+
+        return DryRunReport(
+            source=source,
+            text_file_count=text_count,
+            binary_file_count=binary_count,
+            text_size_bytes=text_bytes,
+            binary_size_bytes=binary_bytes,
+            sizes_available=sizes_available,
+            git_repo_path=git_repo_path,
+            mirror_path=mirror_path,
+            auth_method=auth_method,
+            include_shared=self._include_shared,
+            max_file_size_mb=max_file_size_mb,
+            github_repo=github_repo,
+        )
+
     def _check_disk_space(self, required_bytes: int) -> None:
         """Check if sufficient disk space is available."""
         for path in [self._git._path if hasattr(self._git, '_path') else None,
@@ -233,6 +330,7 @@ class SyncEngine:
             "local_path": local_path,
             "md5": drive_file.md5,
             "last_modified": drive_file.modified_time,
+            "size": drive_file.size,
         }
 
         if is_update:

@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from gdrive_backup.cli import main
+from gdrive_backup.sync_engine import DryRunSource, DryRunReport
 
 
 class TestCLI:
@@ -61,3 +62,182 @@ class TestCLI:
         result = runner.invoke(main, ["status", "--config", str(tmp_path / "c.yaml")])
         assert "success" in result.output
         assert "2" in result.output  # 2 files tracked
+
+
+def _make_dry_run_report():
+    return DryRunReport(
+        source=DryRunSource.DRIVE_API,
+        text_file_count=10,
+        binary_file_count=5,
+        text_size_bytes=1024 * 1024 * 100,  # 100 MB
+        binary_size_bytes=1024 * 1024 * 500,  # 500 MB
+        sizes_available=True,
+        git_repo_path="/tmp/repo",
+        mirror_path="/tmp/mirror",
+        auth_method="oauth",
+        include_shared=False,
+        max_file_size_mb=0,
+        github_repo="alice/backup",
+    )
+
+
+def test_dry_run_flag_calls_run_dry(tmp_path, fake_config_file):
+    """--dry-run calls engine.run_dry() and prints report."""
+    runner = CliRunner()
+    report = _make_dry_run_report()
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine:
+        mock_cfg.return_value = MagicMock(
+            github=None, log_dir=tmp_path, log_max_size_mb=10,
+            log_max_files=5, log_default_level="info",
+        )
+        engine = MagicMock()
+        engine.run_dry.return_value = report
+        mock_engine.return_value = engine
+        result = runner.invoke(main, ["run", "--dry-run", "--config", str(fake_config_file)])
+    assert result.exit_code == 0
+    engine.run_dry.assert_called_once()
+    engine.run.assert_not_called()
+    assert "Dry run" in result.output
+    assert "Text files" in result.output
+    assert "10" in result.output
+
+
+def test_dry_run_skips_github_push(tmp_path, fake_config_file):
+    """--dry-run never pushes to GitHub even if github.enabled."""
+    runner = CliRunner()
+    report = _make_dry_run_report()
+    github_cfg = MagicMock(enabled=True, pat="tok", owner="alice", repo="backup",
+                           e2e_output_mode=None)
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine, \
+         patch("gdrive_backup.cli.GithubManager") as mock_gh:
+        mock_cfg.return_value = MagicMock(
+            github=github_cfg, log_dir=tmp_path,
+            log_max_size_mb=10, log_max_files=5, log_default_level="info",
+        )
+        engine = MagicMock()
+        engine.run_dry.return_value = report
+        mock_engine.return_value = engine
+        result = runner.invoke(main, ["run", "--dry-run", "--config", str(fake_config_file)])
+    assert result.exit_code == 0
+    mock_gh.assert_not_called()
+
+
+def test_init_github_prompts_saved_to_config(tmp_path):
+    """GitHub prompts during init are written to config file."""
+    runner = CliRunner()
+    input_lines = "\n".join([
+        "oauth",           # auth method
+        "",                # credentials file (default)
+        str(tmp_path / "repo"),   # git repo path
+        str(tmp_path / "mirror"), # mirror path
+        "y",               # enable github
+        "alice",           # owner
+        "my-backup",       # repo
+        "y",               # private
+        "y",               # auto_create
+        "",                # PAT (blank = use env var)
+    ])
+    result = runner.invoke(
+        main, ["init", "--config", str(tmp_path / "config.yaml")],
+        input=input_lines,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    config_text = (tmp_path / "config.yaml").read_text()
+    assert "github" in config_text
+    assert "alice" in config_text
+    assert "my-backup" in config_text
+
+
+def test_init_github_skipped_when_declined(tmp_path):
+    """Saying 'n' to GitHub skips the github section."""
+    runner = CliRunner()
+    input_lines = "\n".join([
+        "oauth", "", str(tmp_path / "repo"), str(tmp_path / "mirror"), "n",
+    ])
+    result = runner.invoke(
+        main, ["init", "--config", str(tmp_path / "config.yaml")],
+        input=input_lines,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    config_text = (tmp_path / "config.yaml").read_text()
+    assert "github:" not in config_text
+
+
+def test_dry_run_sizes_unknown_shows_message(tmp_path, fake_config_file):
+    """When sizes_available=False, output includes 'size unknown'."""
+    runner = CliRunner()
+    report = _make_dry_run_report()
+    report.sizes_available = False
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine:
+        mock_cfg.return_value = MagicMock(
+            github=None, log_dir=tmp_path, log_max_size_mb=10,
+            log_max_files=5, log_default_level="info",
+        )
+        engine = MagicMock()
+        engine.run_dry.return_value = report
+        mock_engine.return_value = engine
+        result = runner.invoke(main, ["run", "--dry-run", "--config", str(fake_config_file)])
+    assert "size unknown" in result.output
+
+
+def test_run_pushes_to_github_when_enabled(tmp_path, fake_config_file):
+    """After engine.run(), pushes to GitHub when github.enabled."""
+    runner = CliRunner()
+    from gdrive_backup.sync_engine import SyncStats
+    github_cfg = MagicMock(
+        enabled=True, owner="alice", repo="backup",
+        e2e_output_mode=None, pat="", e2e_base_repo=None,
+    )
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine, \
+         patch("gdrive_backup.cli.GithubManager") as mock_gh_cls, \
+         patch.dict("os.environ", {"GITHUB_PAT": "test_pat"}):
+        cfg = MagicMock(
+            github=github_cfg, log_dir=tmp_path,
+            log_max_size_mb=10, log_max_files=5, log_default_level="info",
+        )
+        mock_cfg.return_value = cfg
+        engine = MagicMock()
+        engine.run.return_value = SyncStats(added=2)
+        mock_engine.return_value = engine
+        gh_instance = MagicMock()
+        gh_instance.get_authenticated_remote_url.return_value = "https://x-access-token:test_pat@github.com/alice/backup.git"
+        gh_instance.get_public_remote_url.return_value = "https://github.com/alice/backup.git"
+        mock_gh_cls.return_value = gh_instance
+        result = runner.invoke(main, ["run", "--config", str(fake_config_file)])
+    assert result.exit_code == 0
+    gh_instance.validate_pat.assert_called_once()
+    gh_instance.ensure_repo_exists.assert_called_once()
+    engine.git_manager.push.assert_called_once()
+    engine.git_manager.remove_remote.assert_called_once_with("origin")
+
+
+def test_run_github_push_failure_is_nonfatal(tmp_path, fake_config_file):
+    """Push failure does not change exit code to non-zero."""
+    from gdrive_backup.sync_engine import SyncStats
+    from gdrive_backup.git_manager import GitError
+    runner = CliRunner()
+    github_cfg = MagicMock(enabled=True, owner="alice", repo="backup",
+                           e2e_output_mode=None, pat="tok", e2e_base_repo=None)
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine, \
+         patch("gdrive_backup.cli.GithubManager") as mock_gh_cls:
+        mock_cfg.return_value = MagicMock(
+            github=github_cfg, log_dir=tmp_path,
+            log_max_size_mb=10, log_max_files=5, log_default_level="info",
+        )
+        engine = MagicMock()
+        engine.run.return_value = SyncStats(added=1)
+        engine.git_manager.push.side_effect = GitError("network error")
+        mock_engine.return_value = engine
+        gh_instance = MagicMock()
+        gh_instance.get_authenticated_remote_url.return_value = "https://x-access-token:tok@github.com/alice/backup.git"
+        mock_gh_cls.return_value = gh_instance
+        result = runner.invoke(main, ["run", "--config", str(fake_config_file)])
+    assert result.exit_code == 0  # non-fatal
+    engine.git_manager.remove_remote.assert_called_once_with("origin")  # cleanup always runs

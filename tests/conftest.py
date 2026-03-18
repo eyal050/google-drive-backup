@@ -76,3 +76,43 @@ def config_file(control_dir, sample_config):
     with open(config_path, "w") as f:
         yaml.dump(sample_config, f)
     return config_path
+
+
+@pytest.fixture
+def fake_config_file(tmp_path):
+    """Write a minimal valid config file and return its path."""
+    git_repo = tmp_path / "git-repo"
+    git_repo.mkdir()
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    config_data = {
+        "auth": {
+            "method": "oauth",
+            "credentials_file": "credentials.json",
+            "token_file": "token.json",
+        },
+        "backup": {
+            "git_repo_path": str(git_repo),
+            "mirror_path": str(mirror),
+        },
+        "scope": {
+            "include_shared": False,
+            "folder_ids": [],
+        },
+        "sync": {
+            "state_file": "state.json",
+        },
+        "max_file_size_mb": 0,
+        "logging": {
+            "max_size_mb": 10,
+            "max_files": 5,
+            "default_level": "info",
+        },
+        "daemon": {
+            "poll_interval": 300,
+        },
+    }
+    config_path = tmp_path / "config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config_data, f)
+    return config_path
