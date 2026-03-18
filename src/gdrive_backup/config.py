@@ -14,10 +14,24 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONTROL_DIR = Path.home() / ".gdrive-backup"
 VALID_AUTH_METHODS = ("oauth", "service_account")
 VALID_LOG_LEVELS = ("debug", "info", "warning", "error")
+VALID_E2E_OUTPUT_MODES = ("new_repo", "new_branch")
 
 
 class ConfigError(Exception):
     """Raised when configuration is invalid."""
+
+
+@dataclass
+class GithubConfig:
+    """GitHub push configuration."""
+    enabled: bool
+    pat: str
+    owner: str
+    repo: str
+    private: bool
+    auto_create: bool
+    e2e_output_mode: Optional[str]   # None | "new_repo" | "new_branch"
+    e2e_base_repo: Optional[str]
 
 
 @dataclass
@@ -55,6 +69,9 @@ class Config:
     # Control dir
     control_dir: Path
 
+    # GitHub
+    github: Optional["GithubConfig"] = None
+
 
 def load_config(config_path: str, control_dir: Optional[str] = None) -> Config:
     """Load and validate config from a YAML file.
@@ -87,6 +104,34 @@ def load_config(config_path: str, control_dir: Optional[str] = None) -> Config:
         raise ConfigError("Config file must contain a YAML mapping")
 
     return _validate_and_resolve(raw, ctrl_dir)
+
+
+def _parse_github_config(raw: dict) -> GithubConfig:
+    """Parse and validate the github config section."""
+    e2e_raw = raw.get("e2e") or {}
+    e2e_output_mode = e2e_raw.get("output_mode") or None
+    e2e_base_repo = e2e_raw.get("base_repo") or None
+
+    if e2e_output_mode is not None and e2e_output_mode not in VALID_E2E_OUTPUT_MODES:
+        raise ConfigError(
+            f"Invalid github.e2e.output_mode: '{e2e_output_mode}'. "
+            f"Must be one of {VALID_E2E_OUTPUT_MODES}"
+        )
+    if e2e_output_mode == "new_branch" and not e2e_base_repo:
+        raise ConfigError(
+            "github.e2e.base_repo is required when e2e.output_mode is 'new_branch'"
+        )
+
+    return GithubConfig(
+        enabled=bool(raw.get("enabled", False)),
+        pat=str(raw.get("pat", "") or ""),
+        owner=str(raw.get("owner", "")),
+        repo=str(raw.get("repo", "")),
+        private=bool(raw.get("private", True)),
+        auto_create=bool(raw.get("auto_create", True)),
+        e2e_output_mode=e2e_output_mode,
+        e2e_base_repo=e2e_base_repo,
+    )
 
 
 def _check_permissions(path: Path) -> None:
@@ -158,6 +203,10 @@ def _validate_and_resolve(raw: dict, control_dir: Path) -> Config:
     if not isinstance(poll_interval, (int, float)) or poll_interval <= 0:
         raise ConfigError("daemon.poll_interval must be a positive number")
 
+    # GitHub
+    github_raw = raw.get("github")
+    github_config = _parse_github_config(github_raw) if github_raw else None
+
     return Config(
         auth_method=auth_method,
         credentials_file=credentials_file,
@@ -174,4 +223,5 @@ def _validate_and_resolve(raw: dict, control_dir: Path) -> Config:
         log_dir=log_dir,
         poll_interval=int(poll_interval),
         control_dir=control_dir,
+        github=github_config,
     )

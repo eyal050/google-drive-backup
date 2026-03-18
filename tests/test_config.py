@@ -91,3 +91,132 @@ class TestConfigPermissions:
         with caplog.at_level(logging.WARNING, logger="gdrive_backup.config"):
             load_config(str(config_file), str(control_dir))
         assert any("permission" in r.message.lower() for r in caplog.records)
+
+
+def test_github_config_parsed(tmp_path):
+    """GithubConfig is parsed from the github section."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("""
+auth:
+  method: oauth
+  credentials_file: creds.json
+  token_file: token.json
+backup:
+  git_repo_path: /tmp/repo
+  mirror_path: /tmp/mirror
+github:
+  enabled: true
+  pat: "mytoken"
+  owner: "alice"
+  repo: "backup-data"
+  private: true
+  auto_create: true
+""")
+    cfg_file.chmod(0o600)
+    config = load_config(str(cfg_file), str(tmp_path))
+    assert config.github is not None
+    assert config.github.enabled is True
+    assert config.github.pat == "mytoken"
+    assert config.github.owner == "alice"
+    assert config.github.repo == "backup-data"
+    assert config.github.private is True
+    assert config.github.auto_create is True
+    assert config.github.e2e_output_mode is None
+    assert config.github.e2e_base_repo is None
+
+
+def test_github_config_absent(tmp_path):
+    """Config without github section has github=None."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("""
+auth:
+  method: oauth
+  credentials_file: creds.json
+  token_file: token.json
+backup:
+  git_repo_path: /tmp/repo
+  mirror_path: /tmp/mirror
+""")
+    cfg_file.chmod(0o600)
+    config = load_config(str(cfg_file), str(tmp_path))
+    assert config.github is None
+
+
+def test_github_config_e2e_new_repo(tmp_path):
+    """e2e.output_mode new_repo is accepted."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("""
+auth:
+  method: oauth
+  credentials_file: creds.json
+  token_file: token.json
+backup:
+  git_repo_path: /tmp/repo
+  mirror_path: /tmp/mirror
+github:
+  enabled: true
+  pat: ""
+  owner: "alice"
+  repo: "backup-data"
+  private: true
+  auto_create: true
+  e2e:
+    output_mode: new_repo
+""")
+    cfg_file.chmod(0o600)
+    config = load_config(str(cfg_file), str(tmp_path))
+    assert config.github.e2e_output_mode == "new_repo"
+
+
+def test_github_config_e2e_invalid_mode(tmp_path):
+    """Invalid e2e.output_mode raises ConfigError."""
+    from gdrive_backup.config import ConfigError
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("""
+auth:
+  method: oauth
+  credentials_file: creds.json
+  token_file: token.json
+backup:
+  git_repo_path: /tmp/repo
+  mirror_path: /tmp/mirror
+github:
+  enabled: true
+  pat: ""
+  owner: "alice"
+  repo: "backup-data"
+  private: true
+  auto_create: false
+  e2e:
+    output_mode: bad_value
+""")
+    cfg_file.chmod(0o600)
+    with pytest.raises(ConfigError, match="e2e.output_mode"):
+        load_config(str(cfg_file), str(tmp_path))
+
+
+def test_github_config_e2e_new_branch_requires_base_repo(tmp_path):
+    """new_branch mode without base_repo raises ConfigError."""
+    from gdrive_backup.config import ConfigError
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("""
+auth:
+  method: oauth
+  credentials_file: creds.json
+  token_file: token.json
+backup:
+  git_repo_path: /tmp/repo
+  mirror_path: /tmp/mirror
+github:
+  enabled: true
+  pat: ""
+  owner: "alice"
+  repo: "backup-data"
+  private: true
+  auto_create: false
+  e2e:
+    output_mode: new_branch
+""")
+    cfg_file.chmod(0o600)
+    with pytest.raises(ConfigError, match="base_repo"):
+        load_config(str(cfg_file), str(tmp_path))
