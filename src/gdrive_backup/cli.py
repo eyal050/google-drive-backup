@@ -145,6 +145,40 @@ def init(ctx, config_path):
         },
     }
 
+    # GitHub setup
+    github_data = None
+    if click.confirm("\nEnable GitHub push?", default=False):
+        gh_owner = click.prompt("  GitHub owner (user or org)")
+        gh_repo = click.prompt("  Repository name")
+        gh_private = click.confirm("  Private repo?", default=True)
+        gh_auto_create = click.confirm("  Auto-create if missing?", default=True)
+        try:
+            gh_pat = click.prompt("  GitHub PAT (leave blank to use GITHUB_PAT env var)", default="").strip()
+        except click.exceptions.Abort:
+            gh_pat = ""
+
+        if gh_pat:
+            try:
+                mgr = GithubManager(gh_pat, gh_owner, gh_repo, gh_private, gh_auto_create)
+                mgr.validate_pat()
+                click.echo("  PAT validated successfully.")
+            except GithubError as e:
+                click.echo(f"  Warning: PAT validation failed: {e}")
+                if not click.confirm("  Save anyway?", default=False):
+                    gh_pat = ""
+
+        github_data = {
+            "enabled": True,
+            "pat": gh_pat,
+            "owner": gh_owner,
+            "repo": gh_repo,
+            "private": gh_private,
+            "auto_create": gh_auto_create,
+        }
+
+    if github_data:
+        config_data["github"] = github_data
+
     with open(config_path, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False)
     os.chmod(config_path, 0o600)
