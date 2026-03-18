@@ -183,3 +183,61 @@ def test_dry_run_sizes_unknown_shows_message(tmp_path, fake_config_file):
         mock_engine.return_value = engine
         result = runner.invoke(main, ["run", "--dry-run", "--config", str(fake_config_file)])
     assert "size unknown" in result.output
+
+
+def test_run_pushes_to_github_when_enabled(tmp_path, fake_config_file):
+    """After engine.run(), pushes to GitHub when github.enabled."""
+    runner = CliRunner()
+    from gdrive_backup.sync_engine import SyncStats
+    github_cfg = MagicMock(
+        enabled=True, owner="alice", repo="backup",
+        e2e_output_mode=None, pat="", e2e_base_repo=None,
+    )
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine, \
+         patch("gdrive_backup.cli.GithubManager") as mock_gh_cls, \
+         patch.dict("os.environ", {"GITHUB_PAT": "test_pat"}):
+        cfg = MagicMock(
+            github=github_cfg, log_dir=tmp_path,
+            log_max_size_mb=10, log_max_files=5, log_default_level="info",
+        )
+        mock_cfg.return_value = cfg
+        engine = MagicMock()
+        engine.run.return_value = SyncStats(added=2)
+        mock_engine.return_value = engine
+        gh_instance = MagicMock()
+        gh_instance.get_authenticated_remote_url.return_value = "https://x-access-token:test_pat@github.com/alice/backup.git"
+        gh_instance.get_public_remote_url.return_value = "https://github.com/alice/backup.git"
+        mock_gh_cls.return_value = gh_instance
+        result = runner.invoke(main, ["run", "--config", str(fake_config_file)])
+    assert result.exit_code == 0
+    gh_instance.validate_pat.assert_called_once()
+    gh_instance.ensure_repo_exists.assert_called_once()
+    engine.git_manager.push.assert_called_once()
+    engine.git_manager.remove_remote.assert_called_once_with("origin")
+
+
+def test_run_github_push_failure_is_nonfatal(tmp_path, fake_config_file):
+    """Push failure does not change exit code to non-zero."""
+    from gdrive_backup.sync_engine import SyncStats
+    from gdrive_backup.git_manager import GitError
+    runner = CliRunner()
+    github_cfg = MagicMock(enabled=True, owner="alice", repo="backup",
+                           e2e_output_mode=None, pat="tok", e2e_base_repo=None)
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine, \
+         patch("gdrive_backup.cli.GithubManager") as mock_gh_cls:
+        mock_cfg.return_value = MagicMock(
+            github=github_cfg, log_dir=tmp_path,
+            log_max_size_mb=10, log_max_files=5, log_default_level="info",
+        )
+        engine = MagicMock()
+        engine.run.return_value = SyncStats(added=1)
+        engine.git_manager.push.side_effect = GitError("network error")
+        mock_engine.return_value = engine
+        gh_instance = MagicMock()
+        gh_instance.get_authenticated_remote_url.return_value = "https://x-access-token:tok@github.com/alice/backup.git"
+        mock_gh_cls.return_value = gh_instance
+        result = runner.invoke(main, ["run", "--config", str(fake_config_file)])
+    assert result.exit_code == 0  # non-fatal
+    engine.git_manager.remove_remote.assert_called_once_with("origin")  # cleanup always runs
