@@ -1,0 +1,88 @@
+name: E2E Backup
+
+on:
+  workflow_dispatch:
+    inputs:
+      output_mode:
+        description: "GitHub output mode"
+        required: true
+        default: new_repo
+        type: choice
+        options:
+          - new_repo
+          - new_branch
+
+jobs:
+  e2e:
+    name: Real end-to-end backup
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "e2e@gdrive-backup"
+          git config --global user.name "E2E"
+
+      - name: Write Google Drive credentials
+        run: |
+          echo "${{ secrets.GDRIVE_CREDENTIALS_JSON }}" | base64 -d > /tmp/gdrive_credentials.json
+          echo "${{ secrets.GDRIVE_TOKEN_JSON }}" | base64 -d > /tmp/gdrive_token.json
+          chmod 600 /tmp/gdrive_credentials.json /tmp/gdrive_token.json
+
+      - name: Write e2e config
+        run: |
+          echo "${{ secrets.E2E_CONFIG_TEMPLATE }}" | base64 -d > /tmp/e2e_config.yaml
+          # Substitute the output_mode placeholder
+          if ! grep -q "__OUTPUT_MODE__" /tmp/e2e_config.yaml; then
+            echo "ERROR: __OUTPUT_MODE__ placeholder not found in E2E_CONFIG_TEMPLATE secret"
+            exit 1
+          fi
+          sed -i "s/__OUTPUT_MODE__/${{ inputs.output_mode }}/g" /tmp/e2e_config.yaml
+          chmod 600 /tmp/e2e_config.yaml
+
+      - name: Run backup
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT_E2E }}
+        run: gdrive-backup run --config /tmp/e2e_config.yaml
+
+      - name: Print results
+        if: success()
+        run: |
+          echo "=== Git log ==="
+          git -C /tmp/e2e-gdrive-repo log --oneline | head -20 || echo "(no commits)"
+          echo "=== Mirror contents ==="
+          find /tmp/e2e-gdrive-mirror -type f | head -40 || echo "(empty)"
+          echo "=== State summary ==="
+          python -c "
+          import json, sys
+          state = json.load(open('/tmp/e2e-state.json'))
+          cache = state.get('file_cache', {})
+          text = sum(1 for v in cache.values() if v.get('type') == 'text')
+          binary = len(cache) - text
+          print(f'Files in state: {len(cache)} ({text} text, {binary} binary)')
+          print(f'Last run: {state.get(\"last_run\", \"unknown\")}')
+          print(f'Status: {state.get(\"last_run_status\", \"unknown\")}')
+          "
+
+      - name: Cleanup e2e outputs
+        if: always()
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT_E2E }}
+        run: |
+          python scripts/cleanup_e2e.py \
+            --delete --yes \
+            --mode ${{ inputs.output_mode }} \
+            --base-repo eyal050/gdrive-backup-data \
+            --repo-dir /tmp/e2e-gdrive-repo \
+            --mirror-dir /tmp/e2e-gdrive-mirror \
+            --owner eyal050
