@@ -92,3 +92,26 @@ class TestGitManager:
         manager.write_file("secure.txt", b"data")
         mode = (repo_dir / "secure.txt").stat().st_mode & 0o777
         assert mode == 0o644
+
+    def test_set_remote_adds_new(self, manager):
+        manager.set_remote("origin", "https://github.com/alice/repo.git")
+        assert "origin" in [r.name for r in manager._repo.remotes]
+        assert manager._repo.remote("origin").url == "https://github.com/alice/repo.git"
+
+    def test_set_remote_updates_url(self, manager):
+        manager.set_remote("origin", "https://github.com/alice/repo.git")
+        manager.set_remote("origin", "https://github.com/alice/other.git")
+        assert manager._repo.remote("origin").url == "https://github.com/alice/other.git"
+
+    def test_remove_remote_removes(self, manager):
+        manager.set_remote("origin", "https://github.com/alice/repo.git")
+        manager.remove_remote("origin")
+        assert "origin" not in [r.name for r in manager._repo.remotes]
+
+    def test_remove_remote_noop_if_absent(self, manager):
+        # Should not raise
+        manager.remove_remote("nonexistent")
+
+    def test_push_raises_when_no_remote(self, manager):
+        with pytest.raises(GitError, match="not found"):
+            manager.push(remote="origin", branch="main")
