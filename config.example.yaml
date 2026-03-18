@@ -33,3 +33,16 @@ logging:
 # Daemon mode
 daemon:
   poll_interval: 300  # Seconds between checks
+
+# GitHub push (optional)
+# Leave pat blank to use the GITHUB_PAT environment variable instead
+github:
+  enabled: false
+  pat: ""
+  owner: "your-github-username"
+  repo: "gdrive-backup-data"
+  private: true
+  auto_create: true
+  # e2e:                        # Only needed for CI/CD end-to-end runs
+  #   output_mode: new_repo     # "new_repo" or "new_branch"
+  #   base_repo: "gdrive-backup-data"
