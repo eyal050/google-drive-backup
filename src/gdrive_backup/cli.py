@@ -19,7 +19,8 @@ from gdrive_backup.drive_client import DriveClient
 from gdrive_backup.git_manager import GitManager
 from gdrive_backup.logging_setup import setup_logging
 from gdrive_backup.mirror_manager import MirrorManager
-from gdrive_backup.sync_engine import SyncEngine
+from gdrive_backup.sync_engine import SyncEngine, DryRunReport, DryRunSource
+from gdrive_backup.github_manager import GithubManager, GithubError
 
 logger = logging.getLogger(__name__)
 
@@ -162,13 +163,44 @@ def init(ctx, config_path):
     click.echo(f"\nTo start your first backup, run: gdrive-backup run")
 
 
+def _format_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n //= 1024
+    return f"{n:.1f} PB"
+
+
+def _print_dry_run_report(report: DryRunReport) -> None:
+    size_str = "(size unknown)" if not report.sizes_available else None
+
+    click.echo("Dry run — no files will be written\n")
+    click.echo(f"Source:         {report.source.value}")
+    text_size = size_str or _format_bytes(report.text_size_bytes)
+    bin_size = size_str or _format_bytes(report.binary_size_bytes)
+    total_size = size_str or _format_bytes(report.text_size_bytes + report.binary_size_bytes)
+    click.echo(f"Text files:     {report.text_file_count:,}  ({text_size})")
+    click.echo(f"Binary files:   {report.binary_file_count:,}  ({bin_size})")
+    click.echo(f"Total:          {report.text_file_count + report.binary_file_count:,}  ({total_size})")
+    click.echo("")
+    click.echo(f"Git repo:       {report.git_repo_path}")
+    click.echo(f"Mirror:         {report.mirror_path}")
+    if report.github_repo:
+        click.echo(f"GitHub repo:    {report.github_repo}  (not validated — value from config)")
+    click.echo(f"Auth method:    {report.auth_method}")
+    click.echo(f"Include shared: {str(report.include_shared).lower()}")
+    click.echo(f"Max file size:  {'no limit' if report.max_file_size_mb == 0 else str(report.max_file_size_mb) + ' MB'}")
+
+
 @main.command()
 @click.option("--config", "config_path", default=None, help="Config file path")
 @click.option("-v", "--verbose", is_flag=True, help="Increase log verbosity")
 @click.option("--debug", is_flag=True, help="Maximum log verbosity")
 @click.option("-q", "--quiet", is_flag=True, help="Suppress console output")
+@click.option("-n", "--dry-run", "dry_run", is_flag=True,
+              help="Preview what would be backed up without writing anything")
 @click.pass_context
-def run(ctx, config_path, verbose, debug, quiet):
+def run(ctx, config_path, verbose, debug, quiet, dry_run):
     """Run a single backup."""
     # Determine console log level
     if quiet:
@@ -199,6 +231,21 @@ def run(ctx, config_path, verbose, debug, quiet):
 
     try:
         engine = _build_engine(config)
+        if dry_run:
+            github_repo = (
+                f"{config.github.owner}/{config.github.repo}"
+                if config.github and config.github.enabled
+                else None
+            )
+            report = engine.run_dry(
+                git_repo_path=str(config.git_repo_path),
+                mirror_path=str(config.mirror_path),
+                auth_method=config.auth_method,
+                max_file_size_mb=config.max_file_size_mb,
+                github_repo=github_repo,
+            )
+            _print_dry_run_report(report)
+            return
         stats = engine.run()
         click.echo(f"Backup complete: {stats.summary()}")
         sys.exit(1 if stats.failed > 0 else 0)
