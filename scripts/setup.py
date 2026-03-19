@@ -70,3 +70,72 @@ def validate_credentials_json(path: Path) -> tuple[bool, str]:
         "Unrecognized credentials format. Expected a Desktop app OAuth credential\n"
         "  (the JSON file should contain an 'installed' key)."
     )
+
+
+def prompt_credentials_path() -> Path:
+    """Prompt for and validate credentials JSON path. Exits after 3 failures."""
+    for attempt in range(3):
+        try:
+            raw = input("Path to downloaded credentials JSON file: ").strip()
+        except EOFError:
+            print("\nSetup cancelled. Re-run install.sh to resume setup.")
+            sys.exit(0)
+
+        if not raw:
+            print("  Please enter a file path.\n")
+            continue
+
+        path = Path(raw).expanduser()
+        ok, error = validate_credentials_json(path)
+        if ok:
+            return path
+
+        print(f"\n  Error: {error}\n")
+        if attempt < 2:
+            print("  Please try again.\n")
+
+    print("Too many failed attempts. Re-run install.sh to resume setup.")
+    sys.exit(1)
+
+
+def main() -> None:
+    """Entry point — wraps _main with Ctrl+C handling."""
+    try:
+        _main()
+    except KeyboardInterrupt:
+        print("\n\nSetup cancelled. Re-run install.sh to resume setup.")
+        sys.exit(0)
+
+
+def _main() -> None:
+    # Welcome header
+    try:
+        import importlib.metadata
+        version = importlib.metadata.version("gdrive-backup")
+    except Exception:
+        version = "unknown"
+
+    print(f"\ngdrive-backup v{version} — Setup Wizard")
+    print("=" * 42)
+    print(GCP_INSTRUCTIONS)
+
+    # Collect and validate credentials
+    creds_path = prompt_credentials_path()
+
+    # Copy to control dir
+    CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+    dest = CONTROL_DIR / "credentials.json"
+    shutil.copy2(creds_path, dest)
+    dest.chmod(0o600)
+
+    print(f"\n  Credentials saved to {dest}")
+    print("  Launching configuration wizard...")
+    print("  (Press Enter to accept defaults where shown)\n")
+
+    # Delegate all remaining setup to gdrive-backup init
+    result = subprocess.run(["gdrive-backup", "init"], check=False)
+    sys.exit(result.returncode)
+
+
+if __name__ == "__main__":
+    main()
