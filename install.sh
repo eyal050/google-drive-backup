@@ -89,12 +89,12 @@ except Exception:
 download_file() {
     local url="$1" dest="$2"
     if command -v curl &>/dev/null; then
-        curl -sSL "$url" -o "$dest"
+        curl -sSL --connect-timeout 10 --max-time 60 "$url" -o "$dest"
     else
-        python3 -c "
-import urllib.request
-urllib.request.urlretrieve('$url', '$dest')
-"
+        python3 - "$url" "$dest" <<'EOF'
+import sys, urllib.request
+urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+EOF
     fi
 }
 
@@ -107,8 +107,8 @@ check_python
 
 # Determine installed version
 installed_ver=""
-if pip show gdrive-backup &>/dev/null 2>&1; then
-    installed_ver=$(pip show gdrive-backup 2>/dev/null | grep "^Version:" | awk '{print $2}')
+if python3 -m pip show gdrive-backup &>/dev/null 2>&1; then
+    installed_ver=$(python3 -m pip show gdrive-backup 2>/dev/null | grep "^Version:" | awk '{print $2}')
 fi
 
 # Get latest version from PyPI
@@ -122,7 +122,7 @@ fi
 if [[ -z "$installed_ver" ]]; then
     # ── Not installed ───────────────────────────────────────────────────────
     info "Installing gdrive-backup..."
-    if ! pip install gdrive-backup; then
+    if ! python3 -m pip install gdrive-backup; then
         err "Installation failed."
         err "Try: pip install --user gdrive-backup"
         exit 1
@@ -132,10 +132,16 @@ if [[ -z "$installed_ver" ]]; then
 elif [[ -n "$latest_ver" ]] && version_gt "$latest_ver" "$installed_ver"; then
     # ── Outdated ────────────────────────────────────────────────────────────
     echo ""
-    read -r -p "Update gdrive-backup from v${installed_ver} to v${latest_ver}? [Y/n] " response
+    if [[ -t 0 ]]; then
+        read -r -p "Update gdrive-backup from v${installed_ver} to v${latest_ver}? [Y/n] " response
+    else
+        warn "Non-interactive shell detected — skipping update prompt."
+        warn "Run the installer in a terminal to upgrade from v${installed_ver} to v${latest_ver}."
+        response="n"
+    fi
     if [[ -z "$response" || "$response" =~ ^[Yy] ]]; then
         info "Updating..."
-        if ! pip install --upgrade gdrive-backup; then
+        if ! python3 -m pip install --upgrade gdrive-backup; then
             err "Update failed."
             err "Try: pip install --user --upgrade gdrive-backup"
             exit 1
