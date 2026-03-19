@@ -2,7 +2,6 @@
 """GCP credential guide and setup handoff for gdrive-backup."""
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -108,6 +107,7 @@ def main() -> None:
 
 
 def _main() -> None:
+    """Core wizard: collect GCP credentials, copy to control dir, hand off to gdrive-backup init."""
     # Welcome header
     try:
         import importlib.metadata
