@@ -28,11 +28,11 @@ This will:
 2. Walk you through getting Google API credentials
 3. Run the interactive setup wizard
 
-> **Windows users:** Use WSL, or run `pip install gdrive-backup` then `python scripts/setup.py` directly.
+> **Windows users:** Requires Python 3.10+. Use WSL, or run `pip install gdrive-backup` then `python scripts/setup.py` directly.
 
 ---
 
-## Step 3 — Run your first backup
+## Run your first backup
 
 ```bash
 gdrive-backup run
