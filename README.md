@@ -17,68 +17,18 @@ Google Docs, Sheets, and Slides are exported to text-friendly formats (`.docx`, 
 
 ---
 
-## Prerequisites
-
-- Python 3.10 or newer
-- Git installed and on your PATH
-- A Google account with Drive access
-
----
-
-## Installation
+## Quick start
 
 ```bash
-pip install gdrive-backup
+curl -sSL https://raw.githubusercontent.com/eyal050/google-drive-backup/main/install.sh | bash
 ```
 
-Or from source:
+This will:
+1. Check your Python version and install `gdrive-backup` (or offer to update if already installed)
+2. Walk you through getting Google API credentials
+3. Run the interactive setup wizard
 
-```bash
-git clone https://github.com/eyal050/google-drive-backup
-cd google-drive-backup
-pip install .
-```
-
-Verify the install:
-
-```bash
-gdrive-backup --version
-```
-
----
-
-## Step 1 — Get Google API credentials
-
-Before you can use this tool, you need to create a Google Cloud project and download a credentials file.
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create a new project (or use an existing one).
-2. Enable the **Google Drive API**:
-   - In the left menu, go to **APIs & Services → Library**
-   - Search for "Google Drive API" and click **Enable**
-3. Create OAuth credentials:
-   - Go to **APIs & Services → Credentials**
-   - Click **Create Credentials → OAuth client ID**
-   - Application type: **Desktop app**
-   - Click **Create**, then **Download JSON**
-4. Save the downloaded file as `credentials.json` — you'll need it in the next step.
-
----
-
-## Step 2 — Run setup
-
-```bash
-gdrive-backup init
-```
-
-This interactive wizard will ask you:
-
-- **Authentication method** — choose `oauth` (recommended for personal use)
-- **Path to credentials JSON** — the file you downloaded in Step 1
-- **Git repo path** — where text files will be stored (default: `~/gdrive-backup-repo`)
-- **Mirror path** — where binary files will be stored (default: `~/gdrive-backup-mirror`)
-- **Enable GitHub push?** — optional, see [GitHub push](#optional-github-push) below
-
-The config is saved to `~/.gdrive-backup/config.yaml`.
+> **Windows users:** Use WSL, or run `pip install gdrive-backup` then `python scripts/setup.py` directly.
 
 ---
 
