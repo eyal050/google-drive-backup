@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """GCP credential guide and setup handoff for gdrive-backup."""
 
+import glob
 import json
+import readline
 import shutil
 import subprocess
 import sys
@@ -71,8 +73,31 @@ def validate_credentials_json(path: Path) -> tuple[bool, str]:
     )
 
 
+def _path_completer(text: str, state: int) -> str | None:
+    """Readline completer for file paths."""
+    expanded = Path(text).expanduser()
+    pattern = str(expanded) + "*"
+    matches = glob.glob(pattern)
+    # Append '/' to directories so the user can keep tabbing into them
+    matches = [m + "/" if Path(m).is_dir() else m for m in matches]
+    # Re-insert the ~ prefix if the user typed it
+    if text.startswith("~"):
+        home = str(Path.home())
+        matches = ["~" + m[len(home):] for m in matches]
+    return matches[state] if state < len(matches) else None
+
+
 def prompt_credentials_path() -> Path:
     """Prompt for and validate credentials JSON path. Exits after 3 failures."""
+    # Enable tab-completion for file paths
+    readline.set_completer(_path_completer)
+    readline.set_completer_delims(" \t\n")
+    # macOS uses libedit which needs a different syntax
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
     for attempt in range(3):
         try:
             raw = input("Path to downloaded credentials JSON file: ").strip()
