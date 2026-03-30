@@ -27,6 +27,18 @@ Thumbs.db
 
 # Project-specific
 .gdrive-backup/
+credentials.json
+token.json
+client_secret*.json
+state.json
+
+# Secrets and keys
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
 
 # Worktrees
 .worktrees/
