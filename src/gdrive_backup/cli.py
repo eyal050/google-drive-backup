@@ -1,9 +1,11 @@
 # src/gdrive_backup/cli.py
 """CLI entry point for gdrive-backup."""
 
+import glob as _glob
 import json
 import logging
 import os
+import readline
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,10 +79,30 @@ def main(ctx):
 
 
 @main.command()
+def _enable_path_completion():
+    """Enable readline tab-completion for file paths."""
+    def _path_completer(text, state):
+        expanded = Path(text).expanduser()
+        matches = _glob.glob(str(expanded) + "*")
+        matches = [m + "/" if Path(m).is_dir() else m for m in matches]
+        if text.startswith("~"):
+            home = str(Path.home())
+            matches = ["~" + m[len(home):] for m in matches]
+        return matches[state] if state < len(matches) else None
+
+    readline.set_completer(_path_completer)
+    readline.set_completer_delims(" \t\n")
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+
 @click.option("--config", "config_path", default=None, help="Config file path")
 @click.pass_context
 def init(ctx, config_path):
     """Set up a new backup configuration."""
+    _enable_path_completion()
     control_dir = _resolve_control_dir(config_path)
     control_dir.mkdir(parents=True, exist_ok=True)
     (control_dir / "logs").mkdir(exist_ok=True)

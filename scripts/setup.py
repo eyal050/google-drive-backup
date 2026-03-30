@@ -73,30 +73,27 @@ def validate_credentials_json(path: Path) -> tuple[bool, str]:
     )
 
 
-def _path_completer(text: str, state: int) -> str | None:
-    """Readline completer for file paths."""
-    expanded = Path(text).expanduser()
-    pattern = str(expanded) + "*"
-    matches = glob.glob(pattern)
-    # Append '/' to directories so the user can keep tabbing into them
-    matches = [m + "/" if Path(m).is_dir() else m for m in matches]
-    # Re-insert the ~ prefix if the user typed it
-    if text.startswith("~"):
-        home = str(Path.home())
-        matches = ["~" + m[len(home):] for m in matches]
-    return matches[state] if state < len(matches) else None
+def _enable_path_completion():
+    """Enable readline tab-completion for file paths."""
+    def _completer(text, state):
+        expanded = Path(text).expanduser()
+        matches = glob.glob(str(expanded) + "*")
+        matches = [m + "/" if Path(m).is_dir() else m for m in matches]
+        if text.startswith("~"):
+            home = str(Path.home())
+            matches = ["~" + m[len(home):] for m in matches]
+        return matches[state] if state < len(matches) else None
 
-
-def prompt_credentials_path() -> Path:
-    """Prompt for and validate credentials JSON path. Exits after 3 failures."""
-    # Enable tab-completion for file paths
-    readline.set_completer(_path_completer)
+    readline.set_completer(_completer)
     readline.set_completer_delims(" \t\n")
-    # macOS uses libedit which needs a different syntax
     if "libedit" in (readline.__doc__ or ""):
         readline.parse_and_bind("bind ^I rl_complete")
     else:
         readline.parse_and_bind("tab: complete")
+
+
+def prompt_credentials_path() -> Path:
+    """Prompt for and validate credentials JSON path. Exits after 3 failures."""
 
     for attempt in range(3):
         try:
@@ -133,6 +130,8 @@ def main() -> None:
 
 def _main() -> None:
     """Core wizard: collect GCP credentials, copy to control dir, hand off to gdrive-backup init."""
+    _enable_path_completion()
+
     # Welcome header
     try:
         import importlib.metadata
