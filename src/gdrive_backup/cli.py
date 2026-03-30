@@ -98,6 +98,15 @@ def _enable_path_completion():
         readline.parse_and_bind("tab: complete")
 
 
+def _prompt_path(label: str, default: str) -> str:
+    """Prompt for a path using input() so readline tab-completion works."""
+    readline.set_startup_hook(lambda: readline.insert_text(default))
+    try:
+        return input(f"{label}: ").strip() or default
+    finally:
+        readline.set_startup_hook()
+
+
 @click.option("--config", "config_path", default=None, help="Config file path")
 @click.pass_context
 def init(ctx, config_path):
@@ -122,22 +131,15 @@ def init(ctx, config_path):
     )
 
     # Credentials file
-    creds_prompt = "Path to credentials JSON file"
-    creds_input = click.prompt(creds_prompt, default=str(control_dir / "credentials.json"))
+    creds_input = _prompt_path("Path to credentials JSON file", str(control_dir / "credentials.json"))
     creds_path = Path(creds_input).expanduser()
 
     if not creds_path.exists():
         click.echo(f"Note: Place your credentials file at {creds_path}")
 
     # Backup paths
-    git_repo_path = click.prompt(
-        "Git repo path (for text files)",
-        default=str(Path.home() / "gdrive-backup-repo"),
-    )
-    mirror_path = click.prompt(
-        "Mirror path (for binary files)",
-        default=str(Path.home() / "gdrive-backup-mirror"),
-    )
+    git_repo_path = _prompt_path("Git repo path (for text files)", str(Path.home() / "gdrive-backup-repo"))
+    mirror_path = _prompt_path("Mirror path (for binary files)", str(Path.home() / "gdrive-backup-mirror"))
 
     # Write config
     config_data = {
