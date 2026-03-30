@@ -132,8 +132,8 @@ if [[ -z "$installed_ver" ]]; then
 elif [[ -n "$latest_ver" ]] && version_gt "$latest_ver" "$installed_ver"; then
     # ── Outdated ────────────────────────────────────────────────────────────
     echo ""
-    if [[ -t 0 ]]; then
-        read -r -p "Update gdrive-backup from v${installed_ver} to v${latest_ver}? [Y/n] " response
+    if [[ -t 0 ]] || [[ -e /dev/tty ]]; then
+        read -r -p "Update gdrive-backup from v${installed_ver} to v${latest_ver}? [Y/n] " response </dev/tty
     else
         warn "Non-interactive shell detected — skipping update prompt."
         warn "Run the installer in a terminal to upgrade from v${installed_ver} to v${latest_ver}."
@@ -165,4 +165,4 @@ trap 'rm -f "$SETUP_TMP"' EXIT
 info "Downloading setup wizard..."
 download_file "$SETUP_URL" "$SETUP_TMP"
 
-python3 "$SETUP_TMP"
+python3 "$SETUP_TMP" </dev/tty
