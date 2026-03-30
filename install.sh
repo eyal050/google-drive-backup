@@ -122,9 +122,9 @@ fi
 if [[ -z "$installed_ver" ]]; then
     # ── Not installed ───────────────────────────────────────────────────────
     info "Installing gdrive-backup..."
-    if ! python3 -m pip install gdrive-backup; then
+    if ! python3 -m pip install "gdrive-backup @ git+https://github.com/${REPO}.git@${BRANCH}"; then
         err "Installation failed."
-        err "Try: pip install --user gdrive-backup"
+        err "Try: pip install 'gdrive-backup @ git+https://github.com/${REPO}.git'"
         exit 1
     fi
     success "Installed gdrive-backup."
@@ -141,9 +141,9 @@ elif [[ -n "$latest_ver" ]] && version_gt "$latest_ver" "$installed_ver"; then
     fi
     if [[ -z "$response" || "$response" =~ ^[Yy] ]]; then
         info "Updating..."
-        if ! python3 -m pip install --upgrade gdrive-backup; then
+        if ! python3 -m pip install --upgrade "gdrive-backup @ git+https://github.com/${REPO}.git@${BRANCH}"; then
             err "Update failed."
-            err "Try: pip install --user --upgrade gdrive-backup"
+            err "Try: pip install --user --upgrade 'gdrive-backup @ git+https://github.com/${REPO}.git'"
             exit 1
         fi
         success "Updated to v${latest_ver}."
