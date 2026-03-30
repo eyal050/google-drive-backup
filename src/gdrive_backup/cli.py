@@ -78,9 +78,8 @@ def main(ctx):
     ctx.ensure_object(dict)
 
 
-@main.command()
-def _enable_path_completion():
-    """Enable readline tab-completion for file paths."""
+def _enable_readline():
+    """Enable readline tab-completion for file paths and input history."""
     def _path_completer(text, state):
         expanded = Path(text).expanduser()
         matches = _glob.glob(str(expanded) + "*")
@@ -98,20 +97,34 @@ def _enable_path_completion():
         readline.parse_and_bind("tab: complete")
 
 
-def _prompt_path(label: str, default: str) -> str:
-    """Prompt for a path using input() so readline tab-completion works."""
-    readline.set_startup_hook(lambda: readline.insert_text(default))
+def _prompt_path(label: str, default: str = "") -> str:
+    """Prompt for a path using input() so readline tab-completion and history work."""
+    if default:
+        readline.set_startup_hook(lambda: readline.insert_text(default))
     try:
-        return input(f"{label}: ").strip() or default
+        value = input(f"{label}: ").strip() or default
     finally:
         readline.set_startup_hook()
+    if value:
+        readline.add_history(value)
+    return value
 
 
+def _prompt_text(label: str, default: str = "") -> str:
+    """Prompt for text using input() so readline history (up/down arrows) works."""
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{label}{suffix}: ").strip() or default
+    if value:
+        readline.add_history(value)
+    return value
+
+
+@main.command()
 @click.option("--config", "config_path", default=None, help="Config file path")
 @click.pass_context
 def init(ctx, config_path):
     """Set up a new backup configuration."""
-    _enable_path_completion()
+    _enable_readline()
     control_dir = _resolve_control_dir(config_path)
     control_dir.mkdir(parents=True, exist_ok=True)
     (control_dir / "logs").mkdir(exist_ok=True)
@@ -124,11 +137,7 @@ def init(ctx, config_path):
             return
 
     # Auth method
-    auth_method = click.prompt(
-        "Authentication method",
-        type=click.Choice(["oauth", "service_account"]),
-        default="oauth",
-    )
+    auth_method = _prompt_text("Authentication method (oauth/service_account)", "oauth")
 
     # Credentials file
     creds_input = _prompt_path("Path to credentials JSON file", str(control_dir / "credentials.json"))
@@ -173,14 +182,11 @@ def init(ctx, config_path):
     # GitHub setup
     github_data = None
     if click.confirm("\nEnable GitHub push?", default=False):
-        gh_owner = click.prompt("  GitHub owner (user or org)")
-        gh_repo = click.prompt("  Repository name")
+        gh_owner = _prompt_text("  GitHub owner (user or org)")
+        gh_repo = _prompt_text("  Repository name")
         gh_private = click.confirm("  Private repo?", default=True)
         gh_auto_create = click.confirm("  Auto-create if missing?", default=True)
-        try:
-            gh_pat = click.prompt("  GitHub PAT (leave blank to use GITHUB_PAT env var)", default="").strip()
-        except click.exceptions.Abort:
-            gh_pat = ""
+        gh_pat = _prompt_text("  GitHub PAT (leave blank to use GITHUB_PAT env var)")
 
         if gh_pat:
             try:

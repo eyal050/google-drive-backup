@@ -98,6 +98,8 @@ def prompt_credentials_path() -> Path:
     for attempt in range(3):
         try:
             raw = input("Path to downloaded credentials JSON file: ").strip()
+            if raw:
+                readline.add_history(raw)
         except EOFError:
             print("\nSetup cancelled. Re-run install.sh to resume setup.")
             sys.exit(0)
