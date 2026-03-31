@@ -138,6 +138,7 @@ def test_init_github_prompts_saved_to_config(tmp_path):
         "y",               # private
         "y",               # auto_create
         "",                # PAT (blank = use env var)
+        "",                # extra trailing newline for input()
     ])
     result = runner.invoke(
         main, ["init", "--config", str(tmp_path / "config.yaml")],

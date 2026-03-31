@@ -7,7 +7,7 @@ import stat
 from pathlib import Path
 from typing import Optional
 
-from git import Repo, InvalidGitRepositoryError
+from git import Repo, InvalidGitRepositoryError, GitCommandError
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +33,24 @@ class GitManager:
         Returns:
             GitManager instance.
         """
-        path.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"Initializing git repo at {path}")
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise GitError(f"Cannot create git repo directory {path}: {e}") from e
+
         try:
             repo = Repo(path)
             logger.debug(f"Opened existing git repo at {path}")
         except InvalidGitRepositoryError:
-            repo = Repo.init(path)
-            logger.info(f"Initialized new git repo at {path}")
+            try:
+                repo = Repo.init(path)
+                logger.info(f"Initialized new git repo at {path}")
+            except Exception as e:
+                raise GitError(f"Failed to initialize git repo at {path}: {e}") from e
+        except Exception as e:
+            raise GitError(f"Failed to open git repo at {path}: {e}") from e
+
         return cls(repo, path)
 
     def write_file(self, relative_path: str, content: bytes) -> None:
@@ -55,12 +66,19 @@ class GitManager:
         self._validate_path(relative_path)
         full_path = self._path / relative_path
 
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_bytes(content)
-        os.chmod(full_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        try:
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_bytes(content)
+            os.chmod(full_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        except OSError as e:
+            raise GitError(f"Failed to write file {relative_path}: {e}") from e
 
-        self._repo.index.add([relative_path])
-        logger.debug(f"Wrote and staged: {relative_path}")
+        try:
+            self._repo.index.add([relative_path])
+        except Exception as e:
+            raise GitError(f"Failed to stage file {relative_path}: {e}") from e
+
+        logger.debug(f"Wrote and staged: {relative_path} ({len(content)} bytes)")
 
     def add_file(self, relative_path: str) -> None:
         """Stage an existing file.
@@ -76,8 +94,11 @@ class GitManager:
             raise GitError(f"Refusing to add symlink: {relative_path}")
 
         self._validate_path(relative_path)
-        self._repo.index.add([relative_path])
-        logger.debug(f"Staged: {relative_path}")
+        try:
+            self._repo.index.add([relative_path])
+            logger.debug(f"Staged: {relative_path}")
+        except Exception as e:
+            raise GitError(f"Failed to stage file {relative_path}: {e}") from e
 
     def remove_file(self, relative_path: str) -> None:
         """Remove a file from the repo and staging area.
@@ -89,8 +110,17 @@ class GitManager:
         full_path = self._path / relative_path
 
         if full_path.exists():
-            self._repo.index.remove([relative_path], working_tree=True)
-            logger.debug(f"Removed: {relative_path}")
+            try:
+                self._repo.index.remove([relative_path], working_tree=True)
+                logger.debug(f"Removed: {relative_path}")
+            except Exception as e:
+                logger.error(f"Failed to remove file {relative_path} from git index: {e}")
+                # Try manual removal as fallback
+                try:
+                    full_path.unlink()
+                    logger.debug(f"Manually deleted file: {relative_path}")
+                except OSError as e2:
+                    logger.error(f"Manual file deletion also failed for {relative_path}: {e2}")
         else:
             logger.warning(f"File not found for removal: {relative_path}")
 
@@ -111,9 +141,19 @@ class GitManager:
             logger.warning(f"Source file not found for move: {old_path}")
             return
 
-        new_full.parent.mkdir(parents=True, exist_ok=True)
-        self._repo.index.move([old_path, new_path])
-        logger.debug(f"Moved: {old_path} → {new_path}")
+        try:
+            new_full.parent.mkdir(parents=True, exist_ok=True)
+            self._repo.index.move([old_path, new_path])
+            logger.debug(f"Moved: {old_path} -> {new_path}")
+        except Exception as e:
+            logger.error(f"Git index move failed for {old_path} -> {new_path}: {e}")
+            # Fallback: manual move + re-add
+            try:
+                os.replace(old_full, new_full)
+                self._repo.index.add([new_path])
+                logger.debug(f"Fallback move succeeded: {old_path} -> {new_path}")
+            except Exception as e2:
+                raise GitError(f"Failed to move {old_path} -> {new_path}: {e2}") from e2
 
     def commit(self, message: str) -> Optional[str]:
         """Create a commit with all staged changes.
@@ -124,25 +164,40 @@ class GitManager:
         Returns:
             Commit SHA hex string, or None if nothing to commit.
         """
-        if not self._has_changes():
-            logger.debug("No changes to commit")
-            return None
+        try:
+            if not self._has_changes():
+                logger.debug("No changes to commit")
+                return None
+        except Exception as e:
+            logger.warning(f"Error checking for changes: {e}. Attempting commit anyway.")
 
-        commit = self._repo.index.commit(message)
-        logger.info(f"Committed: {message} ({commit.hexsha[:8]})")
-        return commit.hexsha
+        try:
+            commit = self._repo.index.commit(message)
+            logger.info(f"Committed: {message} ({commit.hexsha[:8]})")
+            return commit.hexsha
+        except Exception as e:
+            raise GitError(f"Failed to create commit: {e}") from e
 
     def _has_changes(self) -> bool:
         """Check if there are staged changes to commit."""
-        if not self._repo.head.is_valid():
-            # No commits yet — check if index has entries
-            return len(self._repo.index.entries) > 0
+        try:
+            if not self._repo.head.is_valid():
+                # No commits yet — check if index has entries
+                return len(self._repo.index.entries) > 0
 
-        diff = self._repo.index.diff("HEAD")
-        return len(diff) > 0
+            diff = self._repo.index.diff("HEAD")
+            return len(diff) > 0
+        except Exception as e:
+            logger.debug(f"Error checking staged changes: {e}")
+            # When in doubt, try to commit
+            return True
 
     def set_remote(self, name: str, url: str) -> None:
         """Add a remote or update its URL if it already exists."""
+        # Log URL without credentials
+        safe_url = url.split("@")[-1] if "@" in url else url
+        logger.debug(f"Setting remote '{name}' to ...@{safe_url}")
+
         try:
             remote = self._repo.remote(name)
             if remote.url != url:
@@ -152,8 +207,11 @@ class GitManager:
             else:
                 logger.debug(f"Remote '{name}' URL unchanged")
         except ValueError:
-            self._repo.create_remote(name, url)
-            logger.debug(f"Added remote '{name}'")
+            try:
+                self._repo.create_remote(name, url)
+                logger.debug(f"Added remote '{name}'")
+            except Exception as e:
+                raise GitError(f"Failed to create remote '{name}': {e}") from e
 
     def remove_remote(self, name: str) -> None:
         """Remove a remote if it exists; silently does nothing if absent."""
@@ -163,6 +221,8 @@ class GitManager:
             logger.debug(f"Removed remote '{name}'")
         except ValueError:
             pass  # already absent
+        except Exception as e:
+            logger.warning(f"Failed to remove remote '{name}': {e}")
 
     def push(self, remote: str = "origin", branch: str = "main") -> None:
         """Push HEAD to remote/branch.
@@ -180,6 +240,8 @@ class GitManager:
             raise GitError(f"Remote '{remote}' not found")
 
         refspec = f"HEAD:refs/heads/{branch}"
+        logger.info(f"Pushing {refspec} to {remote}")
+
         try:
             push_infos = r.push(refspec=refspec)
         except Exception as e:
@@ -188,6 +250,7 @@ class GitManager:
         for info in push_infos:
             if info.flags & info.ERROR:
                 raise GitError(f"Push to '{remote}/{branch}' failed: {info.summary}")
+            logger.debug(f"Push info: flags={info.flags}, summary={info.summary}")
 
         logger.info(f"Pushed HEAD to {remote}/{branch}")
 

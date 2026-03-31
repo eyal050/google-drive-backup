@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -13,8 +14,8 @@ from typing import Optional
 
 from gdrive_backup.classifier import FileClassifier, FileType, sanitize_filename
 from gdrive_backup.drive_client import DriveClient, DriveFile, GOOGLE_EXPORT_MAP, GOOGLE_EXPORT_EXTENSIONS
-from gdrive_backup.git_manager import GitManager
-from gdrive_backup.mirror_manager import MirrorManager
+from gdrive_backup.git_manager import GitManager, GitError
+from gdrive_backup.mirror_manager import MirrorManager, MirrorError
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,12 @@ class SyncEngine:
         self._state: dict = {}
         self._file_cache: dict = {}
 
+        logger.debug(
+            f"SyncEngine initialized: state_file={state_file}, "
+            f"max_file_size_mb={max_file_size_mb}, include_shared={include_shared}, "
+            f"folder_ids={self._folder_ids}"
+        )
+
     @property
     def git_manager(self) -> GitManager:
         """Expose the underlying GitManager for post-run operations (e.g. push)."""
@@ -101,13 +108,18 @@ class SyncEngine:
 
     def run(self) -> SyncStats:
         """Run a backup — auto-selects full scan or incremental."""
-        self._load_state()
+        logger.info("Starting backup run")
+        try:
+            self._load_state()
+        except Exception as e:
+            logger.error(f"Failed to load state: {e}")
+            raise SyncError(f"Failed to load state: {e}") from e
 
         if self._state.get("start_page_token"):
-            logger.info("Running incremental backup")
+            logger.info("Running incremental backup (found start_page_token in state)")
             return self.run_incremental()
         else:
-            logger.info("Running full scan (first run)")
+            logger.info("Running full scan (first run — no start_page_token)")
             return self.run_full_scan()
 
     def run_full_scan(self) -> SyncStats:
@@ -116,32 +128,61 @@ class SyncEngine:
         self._load_state()
 
         logger.info("Starting full scan...")
-        start_token = self._drive.get_start_page_token()
 
-        for drive_file in self._drive.list_all_files(
-            include_shared=self._include_shared,
-            folder_ids=self._folder_ids if self._folder_ids else None,
-        ):
-            if drive_file.should_skip:
-                logger.debug(f"Skipping non-downloadable: {drive_file.name} ({drive_file.mime_type})")
-                continue
+        # Get start token for future incremental runs
+        try:
+            start_token = self._drive.get_start_page_token()
+            logger.debug(f"Got start_page_token: {start_token}")
+        except Exception as e:
+            logger.error(f"Failed to get start page token: {e}")
+            raise SyncError(f"Failed to get start page token from Drive API: {e}") from e
 
-            try:
-                self._process_file(drive_file, stats)
-            except Exception as e:
-                logger.error(f"Failed to process {drive_file.name}: {e}")
-                stats.failed += 1
+        file_count = 0
+        try:
+            for drive_file in self._drive.list_all_files(
+                include_shared=self._include_shared,
+                folder_ids=self._folder_ids if self._folder_ids else None,
+            ):
+                file_count += 1
+                if drive_file.should_skip:
+                    logger.debug(f"Skipping non-downloadable: {drive_file.name} ({drive_file.mime_type})")
+                    continue
+
+                try:
+                    self._process_file(drive_file, stats)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to process file '{drive_file.name}' (id={drive_file.id}): {e}",
+                        exc_info=True,
+                    )
+                    stats.failed += 1
+        except Exception as e:
+            logger.error(f"Error listing files from Drive API after {file_count} files: {e}", exc_info=True)
+            if file_count == 0:
+                raise SyncError(f"Failed to list any files from Drive API: {e}") from e
+            logger.warning(f"Continuing with {file_count} files processed before error")
 
         # Commit all text file changes
-        commit_msg = f"Backup {datetime.now(timezone.utc).isoformat()} — {stats.summary()}"
-        self._git.commit(commit_msg)
+        try:
+            commit_msg = f"Backup {datetime.now(timezone.utc).isoformat()} — {stats.summary()}"
+            sha = self._git.commit(commit_msg)
+            if sha:
+                logger.info(f"Created commit {sha[:8]}: {commit_msg}")
+            else:
+                logger.debug("No text file changes to commit")
+        except GitError as e:
+            logger.error(f"Failed to create git commit: {e}", exc_info=True)
+            stats.failed += 1
 
         # Save state
         self._state["start_page_token"] = start_token
         self._state["last_run"] = datetime.now(timezone.utc).isoformat()
         self._state["last_run_status"] = "success" if stats.failed == 0 else "partial"
         self._state["file_cache"] = self._file_cache
-        self._save_state()
+        try:
+            self._save_state()
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}", exc_info=True)
 
         logger.info(f"Full scan complete: {stats.summary()}")
         return stats
@@ -155,34 +196,58 @@ class SyncEngine:
         if not start_token:
             raise SyncError("No start_page_token in state — run a full scan first")
 
-        changes, new_token = self._drive.get_changes(start_token)
+        logger.debug(f"Fetching changes since token: {start_token}")
+        try:
+            changes, new_token = self._drive.get_changes(start_token)
+        except Exception as e:
+            logger.error(f"Failed to fetch changes from Drive API: {e}", exc_info=True)
+            raise SyncError(f"Failed to fetch changes: {e}") from e
+
         logger.info(f"Processing {len(changes)} changes")
 
-        for change in changes:
+        for i, change in enumerate(changes):
             try:
+                logger.debug(
+                    f"Change {i+1}/{len(changes)}: file_id={change.file_id}, "
+                    f"removed={change.removed}, has_file={change.file is not None}"
+                )
                 if change.removed:
                     self._handle_delete(change.file_id, stats)
                 elif change.file:
                     if change.file.should_skip:
+                        logger.debug(f"Skipping non-downloadable change: {change.file.name}")
                         continue
                     is_update = change.file_id in self._file_cache
                     self._process_file(change.file, stats, is_update=is_update)
             except Exception as e:
-                logger.error(f"Failed to process change for {change.file_id}: {e}")
+                logger.error(
+                    f"Failed to process change for file_id={change.file_id}: {e}",
+                    exc_info=True,
+                )
                 stats.failed += 1
 
         # Commit text file changes
         if stats.added or stats.modified or stats.deleted:
-            commit_msg = f"Backup {datetime.now(timezone.utc).isoformat()} — {stats.summary()}"
-            self._git.commit(commit_msg)
+            try:
+                commit_msg = f"Backup {datetime.now(timezone.utc).isoformat()} — {stats.summary()}"
+                sha = self._git.commit(commit_msg)
+                if sha:
+                    logger.info(f"Created commit {sha[:8]}: {commit_msg}")
+            except GitError as e:
+                logger.error(f"Failed to create git commit: {e}", exc_info=True)
+                stats.failed += 1
 
         # Save state
         if new_token:
             self._state["start_page_token"] = new_token
+            logger.debug(f"Updated start_page_token: {new_token}")
         self._state["last_run"] = datetime.now(timezone.utc).isoformat()
         self._state["last_run_status"] = "success" if stats.failed == 0 else "partial"
         self._state["file_cache"] = self._file_cache
-        self._save_state()
+        try:
+            self._save_state()
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}", exc_info=True)
 
         logger.info(f"Incremental sync complete: {stats.summary()}")
         return stats
@@ -208,12 +273,14 @@ class SyncEngine:
         sizes_available = True
 
         try:
+            file_count = 0
             for drive_file in self._drive.list_all_files(
                 include_shared=self._include_shared,
                 folder_ids=self._folder_ids if self._folder_ids else None,
             ):
                 if drive_file.should_skip:
                     continue
+                file_count += 1
                 file_type = self._classifier.classify_by_mime(drive_file.mime_type)
                 size = drive_file.size or 0
                 if file_type == FileType.TEXT:
@@ -222,13 +289,14 @@ class SyncEngine:
                 else:
                     binary_count += 1
                     binary_bytes += size
+            logger.info(f"Dry run enumerated {file_count} files from Drive API")
         except Exception as e:
             logger.warning(f"Drive API unavailable for dry run, falling back to state: {e}")
             source = DryRunSource.LOCAL_STATE
             if not self._file_cache:
                 raise SyncError(
-                    "Cannot enumerate files: auth failed and no local state exists"
-                )
+                    "Cannot enumerate files: Drive API failed and no local state exists"
+                ) from e
             for entry in self._file_cache.values():
                 raw_size = entry.get("size")
                 if raw_size is None:
@@ -261,25 +329,42 @@ class SyncEngine:
         for path in [self._git._path if hasattr(self._git, '_path') else None,
                       self._mirror._path if hasattr(self._mirror, '_path') else None]:
             if path and path.exists():
-                usage = shutil.disk_usage(path)
-                if usage.free < required_bytes + (100 * 1024 * 1024):  # 100MB buffer
-                    raise SyncError(
-                        f"Insufficient disk space at {path}: "
-                        f"{usage.free // (1024*1024)}MB free, "
-                        f"need {required_bytes // (1024*1024)}MB + 100MB buffer"
-                    )
+                try:
+                    usage = shutil.disk_usage(path)
+                    if usage.free < required_bytes + (100 * 1024 * 1024):  # 100MB buffer
+                        raise SyncError(
+                            f"Insufficient disk space at {path}: "
+                            f"{usage.free // (1024*1024)}MB free, "
+                            f"need {required_bytes // (1024*1024)}MB + 100MB buffer"
+                        )
+                except SyncError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Could not check disk space at {path}: {e}")
 
     def _process_file(self, drive_file: DriveFile, stats: SyncStats, is_update: bool = False) -> None:
         """Download, classify, and route a single file."""
+        logger.debug(
+            f"Processing file: name='{drive_file.name}', id={drive_file.id}, "
+            f"mime={drive_file.mime_type}, size={drive_file.size}, is_update={is_update}"
+        )
+
         # Check file size limit
         if self._max_file_size_bytes and drive_file.size and drive_file.size > self._max_file_size_bytes:
-            logger.info(f"Skipping large file: {drive_file.name} ({drive_file.size} bytes)")
+            logger.info(
+                f"Skipping large file: {drive_file.name} "
+                f"({drive_file.size} bytes > limit {self._max_file_size_bytes} bytes)"
+            )
             stats.skipped += 1
             return
 
         # Check disk space before downloading
         if drive_file.size:
-            self._check_disk_space(drive_file.size)
+            try:
+                self._check_disk_space(drive_file.size)
+            except SyncError as e:
+                logger.error(f"Disk space check failed for {drive_file.name}: {e}")
+                raise
 
         # Check if file has actually changed (MD5)
         if not is_update and drive_file.id in self._file_cache:
@@ -292,36 +377,65 @@ class SyncEngine:
         file_name = drive_file.name
         if drive_file.is_exportable:
             export_mime = drive_file.export_mime_type
-            content = self._drive.export_file(drive_file.id, export_mime)
+            logger.debug(f"Exporting Google-native file: {drive_file.name} as {export_mime}")
+            try:
+                content = self._drive.export_file(drive_file.id, export_mime)
+            except Exception as e:
+                logger.error(f"Failed to export file '{drive_file.name}' (id={drive_file.id}): {e}")
+                raise
             file_name = f"{drive_file.name}{drive_file.export_extension}"
         else:
-            content = self._drive.download_file(drive_file.id)
+            logger.debug(f"Downloading file: {drive_file.name}")
+            try:
+                content = self._drive.download_file(drive_file.id)
+            except Exception as e:
+                logger.error(f"Failed to download file '{drive_file.name}' (id={drive_file.id}): {e}")
+                raise
+
+        logger.debug(f"Downloaded {len(content)} bytes for '{drive_file.name}'")
 
         # Classify
         file_type = self._classifier.classify(drive_file.mime_type, content)
+        logger.debug(f"Classified '{drive_file.name}' as {file_type.value}")
 
         # Resolve local path
-        folder_path = self._drive.resolve_file_path(drive_file.parents)
+        try:
+            folder_path = self._drive.resolve_file_path(drive_file.parents)
+        except Exception as e:
+            logger.warning(f"Failed to resolve path for '{drive_file.name}', using root: {e}")
+            folder_path = ""
+
         local_path = self._classifier.resolve_local_path(
             folder_path, sanitize_filename(file_name), drive_file.id, self._file_cache
         )
+        logger.debug(f"Resolved local path: {local_path}")
 
         # Handle move/rename: if cached path differs from new path, move the file
         old_cached = self._file_cache.get(drive_file.id)
         if old_cached and old_cached.get("local_path") and old_cached["local_path"] != local_path:
             old_path = old_cached["local_path"]
             old_type = old_cached.get("type", "binary")
-            if old_type == "text":
-                self._git.move_file(old_path, local_path)
-            else:
-                self._mirror.move_file(old_path, local_path)
-            logger.info(f"Moved: {old_path} → {local_path}")
+            try:
+                if old_type == "text":
+                    self._git.move_file(old_path, local_path)
+                else:
+                    self._mirror.move_file(old_path, local_path)
+                logger.info(f"Moved: {old_path} -> {local_path}")
+            except Exception as e:
+                logger.warning(f"Failed to move '{old_path}' -> '{local_path}': {e}. Will write to new path.")
 
         # Route to git or mirror
-        if file_type == FileType.TEXT:
-            self._git.write_file(local_path, content)
-        else:
-            self._mirror.write_file(local_path, content)
+        try:
+            if file_type == FileType.TEXT:
+                self._git.write_file(local_path, content)
+            else:
+                self._mirror.write_file(local_path, content)
+        except (GitError, MirrorError) as e:
+            logger.error(f"Failed to write file '{local_path}': {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error writing file '{local_path}': {e}", exc_info=True)
+            raise
 
         # Update cache
         self._file_cache[drive_file.id] = {
@@ -338,21 +452,28 @@ class SyncEngine:
             logger.info(f"Updated: {local_path}")
         else:
             stats.added += 1
-            logger.info(f"Added: {local_path} → {'git' if file_type == FileType.TEXT else 'mirror'}")
+            logger.info(f"Added: {local_path} -> {'git' if file_type == FileType.TEXT else 'mirror'}")
 
     def _handle_delete(self, file_id: str, stats: SyncStats) -> None:
         """Handle a deleted file."""
         cached = self._file_cache.get(file_id)
         if not cached:
+            logger.debug(f"Delete for unknown file_id={file_id} (not in cache), skipping")
             return
 
         local_path = cached["local_path"]
         file_type = cached["type"]
+        logger.debug(f"Deleting {file_type} file: {local_path} (file_id={file_id})")
 
-        if file_type == "text":
-            self._git.remove_file(local_path)
-        else:
-            self._mirror.delete_file(local_path)
+        try:
+            if file_type == "text":
+                self._git.remove_file(local_path)
+            else:
+                self._mirror.delete_file(local_path)
+        except Exception as e:
+            logger.error(f"Failed to delete file '{local_path}': {e}", exc_info=True)
+            stats.failed += 1
+            return
 
         del self._file_cache[file_id]
         stats.deleted += 1
@@ -361,19 +482,36 @@ class SyncEngine:
     def _load_state(self) -> None:
         """Load state from state file."""
         if self._state_file.exists():
+            logger.debug(f"Loading state from {self._state_file}")
             try:
-                self._state = json.loads(self._state_file.read_text())
+                raw = self._state_file.read_text()
+                self._state = json.loads(raw)
                 self._file_cache = self._state.get("file_cache", {})
-            except (json.JSONDecodeError, Exception) as e:
-                logger.warning(f"Corrupt state file, starting fresh: {e}")
+                logger.info(
+                    f"State loaded: {len(self._file_cache)} files in cache, "
+                    f"last_run={self._state.get('last_run', 'never')}, "
+                    f"status={self._state.get('last_run_status', 'unknown')}"
+                )
+            except json.JSONDecodeError as e:
+                logger.warning(f"Corrupt state file (invalid JSON), starting fresh: {e}")
+                self._state = {}
+                self._file_cache = {}
+            except Exception as e:
+                logger.warning(f"Failed to load state file, starting fresh: {e}")
                 self._state = {}
                 self._file_cache = {}
         else:
+            logger.debug(f"No state file at {self._state_file}, starting fresh")
             self._state = {}
             self._file_cache = {}
 
     def _save_state(self) -> None:
         """Save state to state file."""
-        self._state_file.parent.mkdir(parents=True, exist_ok=True)
-        self._state_file.write_text(json.dumps(self._state, indent=2))
-        logger.debug(f"State saved to {self._state_file}")
+        logger.debug(f"Saving state to {self._state_file} ({len(self._file_cache)} files in cache)")
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            self._state_file.write_text(json.dumps(self._state, indent=2))
+            logger.debug(f"State saved to {self._state_file}")
+        except Exception as e:
+            logger.error(f"Failed to save state to {self._state_file}: {e}", exc_info=True)
+            raise

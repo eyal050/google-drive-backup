@@ -19,7 +19,11 @@ class MirrorManager:
 
     def __init__(self, mirror_path: Path):
         self._path = mirror_path.resolve()
-        self._path.mkdir(parents=True, exist_ok=True)
+        try:
+            self._path.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Mirror directory ready: {self._path}")
+        except OSError as e:
+            raise MirrorError(f"Cannot create mirror directory {mirror_path}: {e}") from e
 
     def write_file(self, relative_path: str, content: bytes) -> None:
         """Write content to a file atomically.
@@ -39,23 +43,35 @@ class MirrorManager:
         if full_path.exists() and full_path.is_symlink():
             raise MirrorError(f"Refusing to overwrite symlink: {relative_path}")
 
-        full_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise MirrorError(f"Failed to create parent directories for {relative_path}: {e}") from e
 
         # Atomic write: temp file + rename
-        fd, tmp_path = tempfile.mkstemp(dir=full_path.parent)
-        fd_closed = False
+        fd = None
+        tmp_path = None
         try:
+            fd, tmp_path = tempfile.mkstemp(dir=full_path.parent)
             os.write(fd, content)
             os.close(fd)
-            fd_closed = True
+            fd = None  # Mark as closed
             os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
             os.replace(tmp_path, full_path)
-        except Exception:
-            if not fd_closed:
-                os.close(fd)
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
+            tmp_path = None  # Mark as moved (no cleanup needed)
+        except Exception as e:
+            raise MirrorError(f"Failed to write mirror file {relative_path}: {e}") from e
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         logger.debug(f"Wrote mirror file: {relative_path} ({len(content)} bytes)")
 
@@ -73,14 +89,19 @@ class MirrorManager:
             logger.debug(f"Mirror file not found for deletion: {relative_path}")
             return
 
-        full_path.unlink()
-        logger.debug(f"Deleted mirror file: {relative_path}")
+        try:
+            full_path.unlink()
+            logger.debug(f"Deleted mirror file: {relative_path}")
+        except OSError as e:
+            logger.error(f"Failed to delete mirror file {relative_path}: {e}")
+            return
 
         # Clean up empty parent directories
         parent = full_path.parent
         while parent != self._path:
             try:
                 parent.rmdir()  # Only succeeds if empty
+                logger.debug(f"Removed empty directory: {parent}")
                 parent = parent.parent
             except OSError:
                 break
@@ -102,9 +123,12 @@ class MirrorManager:
             logger.warning(f"Source not found for move: {old_path}")
             return
 
-        new_full.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(old_full, new_full)
-        logger.debug(f"Moved mirror file: {old_path} → {new_path}")
+        try:
+            new_full.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(old_full, new_full)
+            logger.debug(f"Moved mirror file: {old_path} -> {new_path}")
+        except OSError as e:
+            raise MirrorError(f"Failed to move mirror file {old_path} -> {new_path}: {e}") from e
 
         # Clean up empty parent directories of old path
         parent = old_full.parent

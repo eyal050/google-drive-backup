@@ -7,6 +7,7 @@ import logging
 import os
 import readline
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -22,7 +23,7 @@ from gdrive_backup.drive_client import DriveClient
 from gdrive_backup.git_manager import GitManager, GitError
 from gdrive_backup.logging_setup import setup_logging
 from gdrive_backup.mirror_manager import MirrorManager
-from gdrive_backup.sync_engine import SyncEngine, DryRunReport, DryRunSource
+from gdrive_backup.sync_engine import SyncEngine, SyncError, DryRunReport, DryRunSource
 from gdrive_backup.github_manager import GithubManager, GithubError
 
 logger = logging.getLogger(__name__)
@@ -42,11 +43,41 @@ def _resolve_control_dir(config_path: Optional[str]) -> Path:
 
 def _build_engine(config: Config) -> SyncEngine:
     """Build a SyncEngine from a validated config."""
-    creds = authenticate(config.auth_method, config.credentials_file, config.token_file)
-    service = build_drive_service(creds)
-    drive_client = DriveClient(service)
-    git_manager = GitManager.init_repo(config.git_repo_path)
-    mirror_manager = MirrorManager(config.mirror_path)
+    logger.info("Authenticating with Google Drive API...")
+    try:
+        creds = authenticate(config.auth_method, config.credentials_file, config.token_file)
+    except AuthError as e:
+        logger.error(f"Authentication failed: {e}")
+        raise
+
+    logger.info("Building Drive API service...")
+    try:
+        service = build_drive_service(creds)
+    except Exception as e:
+        logger.error(f"Failed to build Drive API service: {e}")
+        raise AuthError(f"Failed to build Drive API service: {e}") from e
+
+    logger.info("Initializing backup components...")
+    try:
+        drive_client = DriveClient(service)
+    except Exception as e:
+        logger.error(f"Failed to create Drive client: {e}")
+        raise
+
+    try:
+        git_manager = GitManager.init_repo(config.git_repo_path)
+        logger.info(f"Git repo ready: {config.git_repo_path}")
+    except GitError as e:
+        logger.error(f"Failed to initialize git repo at {config.git_repo_path}: {e}")
+        raise
+
+    try:
+        mirror_manager = MirrorManager(config.mirror_path)
+        logger.info(f"Mirror directory ready: {config.mirror_path}")
+    except Exception as e:
+        logger.error(f"Failed to initialize mirror at {config.mirror_path}: {e}")
+        raise
+
     classifier = FileClassifier()
 
     return SyncEngine(
@@ -65,7 +96,8 @@ def _load_state_file(state_path: Path) -> Optional[dict]:
     if state_path.exists():
         try:
             return json.loads(state_path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to load state file {state_path}: {e}")
             return None
     return None
 
@@ -306,24 +338,43 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
         console_level,
     )
 
+    # Log startup information
+    logger.info(f"gdrive-backup v{__version__} starting")
+    logger.info(f"Config: {resolved_config_path}")
+    logger.info(f"Auth method: {config.auth_method}")
+    logger.info(f"Git repo: {config.git_repo_path}")
+    logger.info(f"Mirror: {config.mirror_path}")
+    logger.debug(f"State file: {config.state_file}")
+    logger.debug(f"Include shared: {config.include_shared}")
+    logger.debug(f"Folder IDs: {config.folder_ids}")
+    logger.debug(f"Max file size: {config.max_file_size_mb} MB (0=no limit)")
+
     try:
         engine = _build_engine(config)
+
         if dry_run:
             github_repo = (
                 f"{config.github.owner}/{config.github.repo}"
                 if config.github and config.github.enabled
                 else None
             )
-            report = engine.run_dry(
-                git_repo_path=str(config.git_repo_path),
-                mirror_path=str(config.mirror_path),
-                auth_method=config.auth_method,
-                max_file_size_mb=config.max_file_size_mb,
-                github_repo=github_repo,
-            )
-            _print_dry_run_report(report)
+            try:
+                report = engine.run_dry(
+                    git_repo_path=str(config.git_repo_path),
+                    mirror_path=str(config.mirror_path),
+                    auth_method=config.auth_method,
+                    max_file_size_mb=config.max_file_size_mb,
+                    github_repo=github_repo,
+                )
+                _print_dry_run_report(report)
+            except SyncError as e:
+                click.echo(f"Dry run failed: {e}", err=True)
+                sys.exit(2)
             return
+
+        logger.info("Starting backup...")
         stats = engine.run()
+        logger.info(f"Backup finished: {stats.summary()}")
 
         # GitHub push (skipped when --dry-run; dry_run branch already returned above)
         if config.github and config.github.enabled:
@@ -333,6 +384,7 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
             else:
                 repo_name = _resolve_repo_name(config)
                 remote_branch = repo_name if config.github.e2e_output_mode == "new_branch" else "main"
+                logger.info(f"Pushing to GitHub: {config.github.owner}/{repo_name} (branch: {remote_branch})")
                 try:
                     mgr = GithubManager(
                         pat,
@@ -341,10 +393,13 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
                         config.github.private,
                         config.github.auto_create,
                     )
+                    logger.debug("Validating GitHub PAT...")
                     mgr.validate_pat()
                     if config.github.e2e_output_mode == "new_branch":
+                        logger.debug(f"Ensuring branch '{repo_name}' exists...")
                         mgr.ensure_branch_exists(branch=repo_name, base_branch="main")
                     else:
+                        logger.debug("Ensuring GitHub repo exists...")
                         mgr.ensure_repo_exists()
                     auth_url = mgr.get_authenticated_remote_url()
                     try:
@@ -360,11 +415,21 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
 
         click.echo(f"Backup complete: {stats.summary()}")
         sys.exit(1 if stats.failed > 0 else 0)
+
     except AuthError as e:
         click.echo(f"Authentication error: {e}", err=True)
+        logger.error(f"Authentication error: {e}", exc_info=True)
         sys.exit(2)
+    except SyncError as e:
+        click.echo(f"Sync error: {e}", err=True)
+        logger.error(f"Sync error: {e}", exc_info=True)
+        sys.exit(2)
+    except KeyboardInterrupt:
+        click.echo("\nBackup interrupted by user", err=True)
+        logger.info("Backup interrupted by user (KeyboardInterrupt)")
+        sys.exit(130)
     except Exception as e:
-        logger.exception(f"Backup failed: {e}")
+        logger.exception(f"Backup failed with unexpected error: {e}")
         click.echo(f"Backup failed: {e}", err=True)
         sys.exit(2)
 
@@ -398,7 +463,8 @@ def status(ctx, config_path):
     click.echo(f"Last run:    {state.get('last_run', 'unknown')}")
     click.echo(f"Status:      {state.get('last_run_status', 'unknown')}")
     click.echo(f"Files tracked: {len(state.get('file_cache', {}))}")
-    click.echo(f"Change token:  {state.get('start_page_token', 'none')[:20]}...")
+    token = state.get('start_page_token', 'none')
+    click.echo(f"Change token:  {token[:20] if token else 'none'}...")
 
 
 @main.command()
@@ -440,6 +506,8 @@ def daemon(ctx, config_path):
         None,
     )
 
+    logger.info(f"gdrive-backup daemon v{__version__} starting")
+
     try:
         engine = _build_engine(config)
     except AuthError as e:
@@ -454,6 +522,9 @@ def daemon(ctx, config_path):
     click.echo("Press Ctrl+C to stop")
     try:
         d.run()
+    except KeyboardInterrupt:
+        click.echo("\nDaemon stopped by user")
+        logger.info("Daemon stopped by user (KeyboardInterrupt)")
     except Exception as e:
         logger.exception(f"Daemon failed: {e}")
         click.echo(f"Daemon failed: {e}", err=True)
