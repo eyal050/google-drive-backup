@@ -1,6 +1,7 @@
 # tests/test_sync_engine.py
 """Tests for backup sync engine."""
 
+import io
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ from gdrive_backup.sync_engine import (
     SyncEngine, SyncStats, SyncError,
     DryRunSource, DryRunReport,
     FailureRecord, FolderStats, FileTypeStats,
+    ProgressTracker,
 )
 
 
@@ -334,6 +336,48 @@ def test_run_dry_sizes_unavailable_for_old_state(sync_engine, mock_drive_client,
         max_file_size_mb=0,
     )
     assert report.sizes_available is False
+
+
+# ---------------------------------------------------------------------------
+# ProgressTracker tests
+# ---------------------------------------------------------------------------
+
+class TestProgressTracker:
+    def test_update_increments_count(self):
+        output = io.StringIO()
+        tracker = ProgressTracker(total=100, output=output, is_tty=False)
+        tracker.update("file1.txt")
+        tracker.update("file2.txt")
+        assert tracker.processed == 2
+
+    def test_non_tty_prints_periodic_updates(self):
+        output = io.StringIO()
+        tracker = ProgressTracker(total=200, output=output, is_tty=False)
+        for i in range(101):
+            tracker.update(f"file{i}.txt")
+        text = output.getvalue()
+        # Non-TTY should print at 100-file intervals
+        assert "100/200" in text
+
+    def test_tty_uses_carriage_return(self):
+        output = io.StringIO()
+        tracker = ProgressTracker(total=10, output=output, is_tty=True)
+        tracker.update("test.txt")
+        text = output.getvalue()
+        assert "\r" in text
+
+    def test_finish_prints_newline(self):
+        output = io.StringIO()
+        tracker = ProgressTracker(total=1, output=output, is_tty=True)
+        tracker.update("file.txt")
+        tracker.finish()
+        text = output.getvalue()
+        assert text.endswith("\n")
+
+    def test_zero_total_no_crash(self):
+        output = io.StringIO()
+        tracker = ProgressTracker(total=0, output=output, is_tty=True)
+        tracker.finish()  # should not raise
 
 
 # ---------------------------------------------------------------------------

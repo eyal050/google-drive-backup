@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import shutil
+import sys
+import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -133,6 +135,72 @@ class SyncStats:
         if self.failed:
             parts.append(f"{self.failed} failed")
         return ", ".join(parts) if parts else "no changes"
+
+
+class ProgressTracker:
+    """Displays live progress during backup processing."""
+
+    def __init__(self, total: int, output=None, is_tty: bool = True):
+        self.total = total
+        self.processed = 0
+        self._output = output or sys.stderr
+        self._is_tty = is_tty
+        self._start_time = time.monotonic()
+        self._bar_width = 30
+
+    def update(self, file_name: str) -> None:
+        """Record one processed file and update the display."""
+        self.processed += 1
+        if self._is_tty:
+            self._print_tty(file_name)
+        elif self.processed % 100 == 0 or self.processed == self.total:
+            self._print_log()
+
+    def finish(self) -> None:
+        """Print a final newline to clear the progress line."""
+        if self._is_tty and self.total > 0:
+            self._output.write("\n")
+            try:
+                self._output.flush()
+            except Exception:
+                pass
+
+    def _print_tty(self, file_name: str) -> None:
+        if self.total == 0:
+            return
+        pct = self.processed / self.total
+        filled = int(self._bar_width * pct)
+        bar = "#" * filled + "-" * (self._bar_width - filled)
+        eta = self._format_eta()
+        max_name = 30
+        display_name = file_name[:max_name] + "..." if len(file_name) > max_name else file_name
+        line = f"\r[{self.processed:>{len(str(self.total))}}/{self.total}] {pct:>4.0%} |{bar}| {eta} - {display_name}"
+        self._output.write(line.ljust(120) + "\r")
+        try:
+            self._output.flush()
+        except Exception:
+            pass
+
+    def _print_log(self) -> None:
+        eta = self._format_eta()
+        self._output.write(f"Processed {self.processed}/{self.total} files... {eta}\n")
+        try:
+            self._output.flush()
+        except Exception:
+            pass
+
+    def _format_eta(self) -> str:
+        elapsed = time.monotonic() - self._start_time
+        if self.processed == 0 or elapsed < 1:
+            return "estimating..."
+        rate = self.processed / elapsed
+        remaining = (self.total - self.processed) / rate
+        if remaining < 60:
+            return f"{remaining:.0f}s remaining"
+        elif remaining < 3600:
+            return f"{remaining / 60:.0f}m {remaining % 60:.0f}s remaining"
+        else:
+            return f"{remaining / 3600:.0f}h {(remaining % 3600) / 60:.0f}m remaining"
 
 
 class SyncEngine:
