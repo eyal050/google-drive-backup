@@ -118,3 +118,32 @@ class TestDriveClient:
         ]
         path = client.resolve_file_path(["folder1_id"])
         assert "folder1" in path
+
+
+class TestCountFiles:
+    def test_count_files_returns_total(self):
+        service = MagicMock()
+        client = DriveClient(service)
+
+        # Two pages of results: 3 files on page 1, 2 on page 2
+        page1 = {"files": [{"id": "1"}, {"id": "2"}, {"id": "3"}], "nextPageToken": "tok2"}
+        page2 = {"files": [{"id": "4"}, {"id": "5"}]}
+        service.files.return_value.list.return_value.execute.side_effect = [page1, page2]
+
+        count = client.count_files()
+
+        assert count == 5
+
+    def test_count_files_with_folder_filter(self):
+        service = MagicMock()
+        client = DriveClient(service)
+
+        page1 = {"files": [{"id": "1"}]}
+        service.files.return_value.list.return_value.execute.return_value = page1
+
+        count = client.count_files(folder_ids=["folder1"])
+
+        assert count == 1
+        # Verify query includes folder filter
+        call_kwargs = service.files.return_value.list.call_args
+        assert "folder1" in str(call_kwargs)

@@ -172,6 +172,51 @@ class DriveClient:
 
         logger.info(f"Listed {file_count} files total across {page_num} pages")
 
+    def count_files(
+        self,
+        include_shared: bool = False,
+        folder_ids: Optional[List[str]] = None,
+    ) -> int:
+        """Count total files in Drive without downloading metadata.
+
+        Uses the same query as list_all_files but requests only file IDs
+        for efficiency.
+        """
+        query_parts = ["trashed = false"]
+        if not include_shared:
+            query_parts.append("'me' in owners")
+        if folder_ids:
+            folder_q = " or ".join(f"'{fid}' in parents" for fid in folder_ids)
+            query_parts.append(f"({folder_q})")
+
+        query = " and ".join(query_parts)
+        logger.info(f"Counting files with query: {query}")
+        page_token = None
+        total = 0
+
+        while True:
+            self._limiter.wait()
+            try:
+                response = self._execute_with_retry(
+                    self._service.files().list(
+                        q=query,
+                        fields="nextPageToken, files(id)",
+                        pageSize=1000,
+                        pageToken=page_token,
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Failed to count files ({total} counted so far): {e}")
+                raise
+
+            total += len(response.get("files", []))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        logger.info(f"Total files counted: {total}")
+        return total
+
     def get_start_page_token(self) -> str:
         """Get the current start page token for changes API."""
         logger.debug("Getting start page token for changes API")
