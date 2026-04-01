@@ -107,6 +107,66 @@ def _print_completion_summary(stats, log_path: str = None) -> None:
     click.echo("")
 
 
+def _write_backup_log(stats, git_repo_path, mode: str) -> None:
+    """Append a JSON log entry for this backup run."""
+    log_dir = Path(git_repo_path) / ".gdrive-backup"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "backup-log.json"
+
+    duration = 0
+    if stats.end_time and stats.start_time:
+        duration = (stats.end_time - stats.start_time).total_seconds()
+
+    entry = {
+        "timestamp": stats.start_time.isoformat() if stats.start_time else datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(duration, 1),
+        "mode": mode,
+        "total_files_on_drive": stats.total_files,
+        "summary": {
+            "added": stats.added,
+            "modified": stats.modified,
+            "deleted": stats.deleted,
+            "skipped": stats.skipped,
+            "failed": stats.failed,
+        },
+        "storage": {
+            "drive_total_bytes": stats.drive_total_bytes,
+            "local_total_bytes": stats.local_total_bytes,
+        },
+        "file_types": {
+            ext: {"count": ft.count, "drive_bytes": ft.drive_bytes, "local_bytes": ft.local_bytes}
+            for ext, ft in stats.file_types.items()
+        },
+        "folders": {
+            path: {"file_count": fs.file_count, "drive_bytes": fs.drive_size_bytes, "local_bytes": fs.local_size_bytes}
+            for path, fs in stats.folders.items()
+        },
+        "failures": [
+            {
+                "file_name": f.file_name,
+                "file_id": f.file_id,
+                "folder_path": f.folder_path,
+                "reason": f.reason,
+                "error_message": f.error_message,
+            }
+            for f in stats.failures
+        ],
+    }
+
+    existing = []
+    if log_path.exists():
+        try:
+            existing = json.loads(log_path.read_text())
+            if not isinstance(existing, list):
+                existing = []
+        except (json.JSONDecodeError, OSError):
+            existing = []
+
+    existing.append(entry)
+    log_path.write_text(json.dumps(existing, indent=2))
+    logger.debug(f"Backup log written to {log_path}")
+
+
 def _build_engine(config: Config, quiet: bool = False) -> SyncEngine:
     """Build a SyncEngine from a validated config."""
     logger.info("Authenticating with Google Drive API...")
@@ -442,6 +502,14 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
         logger.info("Starting backup...")
         stats = engine.run()
         logger.info(f"Backup finished: {stats.summary()}")
+
+        # Write JSON backup log
+        try:
+            mode = "full_scan" if stats.total_files > 0 else "incremental"
+            _write_backup_log(stats, config.git_repo_path, mode)
+            engine.git_manager.ensure_gitignore(".gdrive-backup/")
+        except Exception as e:
+            logger.warning(f"Failed to write backup log: {e}")
 
         # GitHub push (skipped when --dry-run; dry_run branch already returned above)
         if config.github and config.github.enabled:

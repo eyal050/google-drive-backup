@@ -115,3 +115,29 @@ class TestGitManager:
     def test_push_raises_when_no_remote(self, manager):
         with pytest.raises(GitError, match="not found"):
             manager.push(remote="origin", branch="main")
+
+
+class TestEnsureGitignore:
+    def test_creates_gitignore_with_entry(self, tmp_path):
+        repo = Repo.init(tmp_path)
+        gm = GitManager(repo, tmp_path)
+        gm.ensure_gitignore(".gdrive-backup/")
+        gitignore = (tmp_path / ".gitignore").read_text()
+        assert ".gdrive-backup/" in gitignore
+
+    def test_appends_to_existing_gitignore(self, tmp_path):
+        repo = Repo.init(tmp_path)
+        (tmp_path / ".gitignore").write_text("*.pyc\n")
+        gm = GitManager(repo, tmp_path)
+        gm.ensure_gitignore(".gdrive-backup/")
+        gitignore = (tmp_path / ".gitignore").read_text()
+        assert "*.pyc" in gitignore
+        assert ".gdrive-backup/" in gitignore
+
+    def test_does_not_duplicate_entry(self, tmp_path):
+        repo = Repo.init(tmp_path)
+        (tmp_path / ".gitignore").write_text(".gdrive-backup/\n")
+        gm = GitManager(repo, tmp_path)
+        gm.ensure_gitignore(".gdrive-backup/")
+        gitignore = (tmp_path / ".gitignore").read_text()
+        assert gitignore.count(".gdrive-backup/") == 1

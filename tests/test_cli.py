@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 from click.testing import CliRunner
 
-from gdrive_backup.cli import main
+from gdrive_backup.cli import main, _write_backup_log
 from gdrive_backup.sync_engine import DryRunSource, DryRunReport, SyncStats, FolderStats, FileTypeStats, FailureRecord
 
 
@@ -242,6 +242,47 @@ def test_run_github_push_failure_is_nonfatal(tmp_path, fake_config_file):
         result = runner.invoke(main, ["run", "--config", str(fake_config_file)])
     assert result.exit_code == 0  # non-fatal
     engine.git_manager.remove_remote.assert_called_once_with("origin")  # cleanup always runs
+
+
+def test_write_backup_log_creates_file(tmp_path):
+    """First run creates the log file with one entry."""
+    stats = SyncStats(added=5, failed=1)
+    stats.total_files = 10
+    stats.end_time = stats.start_time
+    stats.record_failure("bad.pdf", "f1", "Docs", "permission_denied", "403")
+    stats.record_file("Photos", ".jpg", 5000, 4800)
+
+    _write_backup_log(stats, tmp_path, "full_scan")
+
+    log_path = tmp_path / ".gdrive-backup" / "backup-log.json"
+    assert log_path.exists()
+    import json as _json
+    data = _json.loads(log_path.read_text())
+    assert len(data) == 1
+    assert data[0]["summary"]["added"] == 5
+    assert data[0]["mode"] == "full_scan"
+    assert len(data[0]["failures"]) == 1
+    assert ".jpg" in data[0]["file_types"]
+
+
+def test_write_backup_log_appends(tmp_path):
+    """Subsequent runs append to the existing log."""
+    import json as _json
+    log_dir = tmp_path / ".gdrive-backup"
+    log_dir.mkdir()
+    log_path = log_dir / "backup-log.json"
+    log_path.write_text(_json.dumps([{"existing": True}]))
+
+    stats = SyncStats(added=1)
+    stats.total_files = 1
+    stats.end_time = stats.start_time
+
+    _write_backup_log(stats, tmp_path, "incremental")
+
+    data = _json.loads(log_path.read_text())
+    assert len(data) == 2
+    assert data[0]["existing"] is True
+    assert data[1]["summary"]["added"] == 1
 
 
 def test_run_prints_rich_summary(tmp_path, fake_config_file):

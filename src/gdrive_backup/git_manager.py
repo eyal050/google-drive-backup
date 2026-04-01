@@ -254,6 +254,21 @@ class GitManager:
 
         logger.info(f"Pushed HEAD to {remote}/{branch}")
 
+    def ensure_gitignore(self, entry: str) -> None:
+        """Ensure an entry exists in .gitignore, creating the file if needed."""
+        gitignore_path = self._path / ".gitignore"
+        if gitignore_path.exists():
+            content = gitignore_path.read_text()
+            if entry in content.splitlines():
+                return
+            if not content.endswith("\n"):
+                content += "\n"
+            content += entry + "\n"
+        else:
+            content = entry + "\n"
+        gitignore_path.write_text(content)
+        logger.debug(f"Added '{entry}' to .gitignore")
+
     def _validate_path(self, relative_path: str) -> None:
         """Validate that a path doesn't escape the repo root."""
         resolved = (self._path / relative_path).resolve()
