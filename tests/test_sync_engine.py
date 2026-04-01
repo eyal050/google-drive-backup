@@ -9,8 +9,11 @@ import pytest
 
 from gdrive_backup.classifier import FileClassifier, FileType
 from gdrive_backup.drive_client import DriveFile, DriveChange
-from gdrive_backup.sync_engine import SyncEngine, SyncStats, SyncError
-from gdrive_backup.sync_engine import DryRunSource, DryRunReport
+from gdrive_backup.sync_engine import (
+    SyncEngine, SyncStats, SyncError,
+    DryRunSource, DryRunReport,
+    FailureRecord, FolderStats, FileTypeStats,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -330,3 +333,48 @@ def test_run_dry_sizes_unavailable_for_old_state(sync_engine, mock_drive_client,
         max_file_size_mb=0,
     )
     assert report.sizes_available is False
+
+
+# ---------------------------------------------------------------------------
+# Enriched SyncStats tests
+# ---------------------------------------------------------------------------
+
+class TestSyncStatsEnriched:
+    def test_default_new_fields(self):
+        stats = SyncStats()
+        assert stats.total_files == 0
+        assert stats.folders == {}
+        assert stats.file_types == {}
+        assert stats.failures == []
+        assert stats.drive_total_bytes == 0
+        assert stats.local_total_bytes == 0
+        assert stats.start_time is not None
+        assert stats.end_time is None
+
+    def test_record_file_updates_folder_stats(self):
+        stats = SyncStats()
+        stats.record_file("My Drive/Photos", ".jpg", drive_bytes=5000, local_bytes=4800)
+        stats.record_file("My Drive/Photos", ".png", drive_bytes=3000, local_bytes=2900)
+        stats.record_file("My Drive/Docs", ".docx", drive_bytes=1000, local_bytes=950)
+
+        assert stats.folders["My Drive/Photos"].file_count == 2
+        assert stats.folders["My Drive/Photos"].drive_size_bytes == 8000
+        assert stats.folders["My Drive/Photos"].local_size_bytes == 7700
+        assert stats.folders["My Drive/Docs"].file_count == 1
+        assert stats.file_types[".jpg"].count == 1
+        assert stats.file_types[".jpg"].drive_bytes == 5000
+        assert stats.file_types[".png"].count == 1
+        assert stats.drive_total_bytes == 9000
+        assert stats.local_total_bytes == 8650
+
+    def test_record_failure(self):
+        stats = SyncStats()
+        stats.record_failure("big.mp4", "file123", "My Drive/Videos", "too_large", "2.1 GB exceeds limit")
+        assert len(stats.failures) == 1
+        assert stats.failures[0].reason == "too_large"
+        assert stats.failures[0].file_name == "big.mp4"
+
+    def test_summary_still_works(self):
+        stats = SyncStats(added=3, failed=1)
+        assert "3 added" in stats.summary()
+        assert "1 failed" in stats.summary()

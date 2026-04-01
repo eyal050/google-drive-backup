@@ -24,6 +24,32 @@ class SyncError(Exception):
     """Raised when sync fails fatally."""
 
 
+@dataclass
+class FailureRecord:
+    """Details about a file that failed to process."""
+    file_name: str
+    file_id: str
+    folder_path: str
+    reason: str
+    error_message: str
+
+
+@dataclass
+class FolderStats:
+    """Per-folder file count and size."""
+    file_count: int = 0
+    drive_size_bytes: int = 0
+    local_size_bytes: int = 0
+
+
+@dataclass
+class FileTypeStats:
+    """Per-extension file count and size."""
+    count: int = 0
+    drive_bytes: int = 0
+    local_bytes: int = 0
+
+
 class DryRunSource(Enum):
     DRIVE_API = "drive_api"
     LOCAL_STATE = "local_state"
@@ -54,6 +80,45 @@ class SyncStats:
     deleted: int = 0
     skipped: int = 0
     failed: int = 0
+
+    # Enriched fields
+    total_files: int = 0
+    folders: dict = field(default_factory=dict)
+    file_types: dict = field(default_factory=dict)
+    failures: list = field(default_factory=list)
+    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    end_time: Optional[datetime] = None
+    drive_total_bytes: int = 0
+    local_total_bytes: int = 0
+
+    def record_file(self, folder_path: str, extension: str, drive_bytes: int, local_bytes: int) -> None:
+        """Update per-folder stats, per-file-type stats, and running totals."""
+        if folder_path not in self.folders:
+            self.folders[folder_path] = FolderStats()
+        fs = self.folders[folder_path]
+        fs.file_count += 1
+        fs.drive_size_bytes += drive_bytes
+        fs.local_size_bytes += local_bytes
+
+        if extension not in self.file_types:
+            self.file_types[extension] = FileTypeStats()
+        ft = self.file_types[extension]
+        ft.count += 1
+        ft.drive_bytes += drive_bytes
+        ft.local_bytes += local_bytes
+
+        self.drive_total_bytes += drive_bytes
+        self.local_total_bytes += local_bytes
+
+    def record_failure(self, file_name: str, file_id: str, folder_path: str, reason: str, error_message: str) -> None:
+        """Append a FailureRecord to the failures list."""
+        self.failures.append(FailureRecord(
+            file_name=file_name,
+            file_id=file_id,
+            folder_path=folder_path,
+            reason=reason,
+            error_message=error_message,
+        ))
 
     def summary(self) -> str:
         parts = []
