@@ -3,12 +3,13 @@
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from click.testing import CliRunner
 
 from gdrive_backup.cli import main
-from gdrive_backup.sync_engine import DryRunSource, DryRunReport
+from gdrive_backup.sync_engine import DryRunSource, DryRunReport, SyncStats, FolderStats, FileTypeStats, FailureRecord
 
 
 class TestCLI:
@@ -27,20 +28,19 @@ class TestCLI:
     @patch("gdrive_backup.cli._build_engine")
     @patch("gdrive_backup.cli.load_config")
     @patch("gdrive_backup.cli.setup_logging")
-    def test_run_command_executes_sync(self, mock_logging, mock_load_cfg, mock_build, runner, tmp_path):
+    @patch("gdrive_backup.cli._print_completion_summary")
+    def test_run_command_executes_sync(self, mock_summary, mock_logging, mock_load_cfg, mock_build, runner, tmp_path):
         mock_config = MagicMock()
         mock_load_cfg.return_value = mock_config
 
         mock_engine = MagicMock()
-        mock_stats = MagicMock()
-        mock_stats.summary.return_value = "1 added"
-        mock_stats.failed = 0
+        mock_stats = SyncStats(added=1)
         mock_engine.run.return_value = mock_stats
         mock_build.return_value = mock_engine
 
         result = runner.invoke(main, ["run", "--config", str(tmp_path / "config.yaml")])
         assert result.exit_code == 0
-        mock_build.assert_called_once_with(mock_config)
+        mock_build.assert_called_once_with(mock_config, quiet=False)
         mock_engine.run.assert_called_once()
 
     def test_run_with_missing_config_fails(self, runner):
@@ -242,3 +242,39 @@ def test_run_github_push_failure_is_nonfatal(tmp_path, fake_config_file):
         result = runner.invoke(main, ["run", "--config", str(fake_config_file)])
     assert result.exit_code == 0  # non-fatal
     engine.git_manager.remove_remote.assert_called_once_with("origin")  # cleanup always runs
+
+
+def test_run_prints_rich_summary(tmp_path, fake_config_file):
+    """After backup, CLI prints detailed summary with types and folders."""
+    runner = CliRunner()
+    stats = SyncStats(added=100, failed=2)
+    stats.total_files = 110
+    stats.drive_total_bytes = 1_000_000_000
+    stats.local_total_bytes = 950_000_000
+    stats.end_time = stats.start_time + timedelta(minutes=4, seconds=32)
+    stats.folders["My Drive/Photos"] = FolderStats(file_count=80, drive_size_bytes=800_000_000, local_size_bytes=760_000_000)
+    stats.folders["My Drive/Docs"] = FolderStats(file_count=20, drive_size_bytes=200_000_000, local_size_bytes=190_000_000)
+    stats.file_types[".jpg"] = FileTypeStats(count=70, drive_bytes=700_000_000, local_bytes=660_000_000)
+    stats.file_types[".pdf"] = FileTypeStats(count=30, drive_bytes=300_000_000, local_bytes=290_000_000)
+    stats.record_failure("big.mp4", "f1", "Videos", "too_large", "exceeds limit")
+    stats.record_failure("secret.docx", "f2", "Work", "permission_denied", "403")
+
+    with patch("gdrive_backup.cli.load_config") as mock_cfg, \
+         patch("gdrive_backup.cli._build_engine") as mock_engine, \
+         patch("gdrive_backup.cli.setup_logging"):
+        mock_cfg.return_value = MagicMock(
+            github=None, log_dir=tmp_path, log_max_size_mb=10,
+            log_max_files=5, log_default_level="info",
+            git_repo_path=tmp_path / "repo",
+        )
+        engine = MagicMock()
+        engine.run.return_value = stats
+        mock_engine.return_value = engine
+        result = runner.invoke(main, ["run", "--config", str(fake_config_file)])
+
+    assert "4m 32s" in result.output
+    assert ".jpg" in result.output
+    assert ".pdf" in result.output
+    assert "My Drive/Photos" in result.output
+    assert "Too large" in result.output or "too_large" in result.output
+    assert "Permission denied" in result.output or "permission_denied" in result.output

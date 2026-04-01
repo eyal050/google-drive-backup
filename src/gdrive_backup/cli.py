@@ -41,7 +41,73 @@ def _resolve_control_dir(config_path: Optional[str]) -> Path:
     return DEFAULT_CONTROL_DIR
 
 
-def _build_engine(config: Config) -> SyncEngine:
+def _format_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins}m"
+
+
+def _print_completion_summary(stats, log_path: str = None) -> None:
+    """Print a rich backup completion summary."""
+    duration = ""
+    if stats.end_time and stats.start_time:
+        elapsed = (stats.end_time - stats.start_time).total_seconds()
+        duration = f" in {_format_duration(elapsed)}"
+
+    click.echo(f"\nBackup complete{duration}\n")
+    click.echo(f"  Files: {stats.summary()}")
+
+    if stats.drive_total_bytes > 0 or stats.local_total_bytes > 0:
+        click.echo(f"  Storage: {_format_bytes(stats.drive_total_bytes)} on Drive -> {_format_bytes(stats.local_total_bytes)} local")
+
+    if stats.file_types:
+        click.echo("\n  By type:")
+        sorted_types = sorted(stats.file_types.items(), key=lambda x: x[1].count, reverse=True)
+        for ext, ft in sorted_types:
+            click.echo(f"    {ext:<25} {ft.count:>6,} files  {_format_bytes(ft.local_bytes):>10}")
+
+    if stats.folders:
+        sorted_folders = sorted(stats.folders.items(), key=lambda x: x[1].file_count, reverse=True)
+        top = sorted_folders[:10]
+        click.echo(f"\n  Top folders ({min(10, len(sorted_folders))}):")
+        for path, fs in top:
+            display_path = path if path else "(root)"
+            click.echo(f"    {display_path:<40} {fs.file_count:>6,} files  {_format_bytes(fs.local_size_bytes):>10}")
+
+    if stats.failures:
+        click.echo(f"\n  Failed ({len(stats.failures)} files):")
+        by_reason = {}
+        for f in stats.failures:
+            by_reason.setdefault(f.reason, []).append(f.file_name)
+        reason_labels = {
+            "too_large": "Too large",
+            "permission_denied": "Permission denied",
+            "export_failed": "Export failed",
+            "disk_full": "Disk full",
+            "download_error": "Download error",
+            "unknown": "Unknown error",
+        }
+        for reason, files in by_reason.items():
+            label = reason_labels.get(reason, reason)
+            names = ", ".join(files[:5])
+            if len(files) > 5:
+                names += f", ... (+{len(files) - 5} more)"
+            click.echo(f"    {label} ({len(files)}): {names}")
+
+    if log_path:
+        click.echo(f"\n  Full details: {log_path}")
+
+    click.echo("")
+
+
+def _build_engine(config: Config, quiet: bool = False) -> SyncEngine:
     """Build a SyncEngine from a validated config."""
     logger.info("Authenticating with Google Drive API...")
     try:
@@ -89,6 +155,7 @@ def _build_engine(config: Config) -> SyncEngine:
         max_file_size_mb=config.max_file_size_mb,
         include_shared=config.include_shared,
         folder_ids=config.folder_ids,
+        quiet=quiet,
     )
 
 
@@ -350,7 +417,7 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
     logger.debug(f"Max file size: {config.max_file_size_mb} MB (0=no limit)")
 
     try:
-        engine = _build_engine(config)
+        engine = _build_engine(config, quiet=quiet)
 
         if dry_run:
             github_repo = (
@@ -413,7 +480,8 @@ def run(ctx, config_path, verbose, debug, quiet, dry_run):
                 except GithubError as e:
                     logger.error(f"GitHub error: {e}")
 
-        click.echo(f"Backup complete: {stats.summary()}")
+        log_file = str(config.git_repo_path / ".gdrive-backup" / "backup-log.json")
+        _print_completion_summary(stats, log_path=log_file)
         sys.exit(1 if stats.failed > 0 else 0)
 
     except AuthError as e:
