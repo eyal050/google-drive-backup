@@ -482,11 +482,12 @@ def _resolve_repo_name(config) -> str:
 
 
 def _format_bytes(n: int) -> str:
+    size = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n //= 1024
-    return f"{n:.1f} PB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
 
 
 def _print_dry_run_report(report: DryRunReport) -> None:

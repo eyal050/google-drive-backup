@@ -102,9 +102,10 @@ class SyncStats:
         fs.drive_size_bytes += drive_bytes
         fs.local_size_bytes += local_bytes
 
-        if extension not in self.file_types:
-            self.file_types[extension] = FileTypeStats()
-        ft = self.file_types[extension]
+        ext = extension.lower() if extension else "(no extension)"
+        if ext not in self.file_types:
+            self.file_types[ext] = FileTypeStats()
+        ft = self.file_types[ext]
         ft.count += 1
         ft.drive_bytes += drive_bytes
         ft.local_bytes += local_bytes
