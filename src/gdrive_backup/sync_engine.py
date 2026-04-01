@@ -216,6 +216,19 @@ class SyncEngine:
                 try:
                     self._process_file(drive_file, stats)
                 except Exception as e:
+                    reason = self._categorize_failure(e)
+                    folder_path = ""
+                    try:
+                        folder_path = self._drive.resolve_file_path(drive_file.parents)
+                    except Exception:
+                        pass
+                    stats.record_failure(
+                        file_name=drive_file.name,
+                        file_id=drive_file.id,
+                        folder_path=folder_path,
+                        reason=reason,
+                        error_message=str(e),
+                    )
                     logger.error(
                         f"Failed to process file '{drive_file.name}' (id={drive_file.id}): {e}",
                         exc_info=True,
@@ -249,6 +262,7 @@ class SyncEngine:
         except Exception as e:
             logger.error(f"Failed to save state: {e}", exc_info=True)
 
+        stats.end_time = datetime.now(timezone.utc)
         logger.info(f"Full scan complete: {stats.summary()}")
         return stats
 
@@ -285,6 +299,21 @@ class SyncEngine:
                     is_update = change.file_id in self._file_cache
                     self._process_file(change.file, stats, is_update=is_update)
             except Exception as e:
+                reason = self._categorize_failure(e)
+                file_name = change.file.name if change.file else f"file_id={change.file_id}"
+                folder_path = ""
+                if change.file:
+                    try:
+                        folder_path = self._drive.resolve_file_path(change.file.parents)
+                    except Exception:
+                        pass
+                stats.record_failure(
+                    file_name=file_name,
+                    file_id=change.file_id,
+                    folder_path=folder_path,
+                    reason=reason,
+                    error_message=str(e),
+                )
                 logger.error(
                     f"Failed to process change for file_id={change.file_id}: {e}",
                     exc_info=True,
@@ -314,6 +343,7 @@ class SyncEngine:
         except Exception as e:
             logger.error(f"Failed to save state: {e}", exc_info=True)
 
+        stats.end_time = datetime.now(timezone.utc)
         logger.info(f"Incremental sync complete: {stats.summary()}")
         return stats
 
@@ -406,6 +436,28 @@ class SyncEngine:
                     raise
                 except Exception as e:
                     logger.warning(f"Could not check disk space at {path}: {e}")
+
+    @staticmethod
+    def _categorize_failure(error: Exception) -> str:
+        """Classify an exception into a failure reason category."""
+        from googleapiclient.errors import HttpError as _HttpError
+        if isinstance(error, SyncError):
+            msg = str(error).lower()
+            if "disk space" in msg or "insufficient" in msg:
+                return "disk_full"
+            if "file size" in msg or "exceeds limit" in msg:
+                return "too_large"
+        if isinstance(error, _HttpError):
+            if error.resp.status == 403:
+                return "permission_denied"
+            if error.resp.status >= 500:
+                return "download_error"
+        msg = str(error).lower()
+        if "export" in msg:
+            return "export_failed"
+        if "permission" in msg or "403" in msg:
+            return "permission_denied"
+        return "unknown"
 
     def _process_file(self, drive_file: DriveFile, stats: SyncStats, is_update: bool = False) -> None:
         """Download, classify, and route a single file."""
@@ -511,6 +563,12 @@ class SyncEngine:
             "last_modified": drive_file.modified_time,
             "size": drive_file.size,
         }
+
+        # Collect enriched stats
+        ext = Path(local_path).suffix
+        drive_bytes = drive_file.size or 0
+        local_bytes = len(content)
+        stats.record_file(folder_path, ext, drive_bytes, local_bytes)
 
         if is_update:
             stats.modified += 1

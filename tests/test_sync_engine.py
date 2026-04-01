@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from gdrive_backup.classifier import FileClassifier, FileType
 from gdrive_backup.drive_client import DriveFile, DriveChange
@@ -378,3 +379,90 @@ class TestSyncStatsEnriched:
         stats = SyncStats(added=3, failed=1)
         assert "3 added" in stats.summary()
         assert "1 failed" in stats.summary()
+
+
+# ---------------------------------------------------------------------------
+# Stats collection integration tests
+# ---------------------------------------------------------------------------
+
+class TestStatsCollection:
+    @pytest.fixture
+    def mock_drive(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_git(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_mirror(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_classifier(self):
+        clf = MagicMock()
+        clf.classify.return_value = FileType.TEXT
+        clf.resolve_local_path.side_effect = lambda folder, name, fid, cache: f"{folder}/{name}" if folder else name
+        return clf
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return tmp_path / "state.json"
+
+    @pytest.fixture
+    def engine(self, mock_drive, mock_git, mock_mirror, mock_classifier, state_file):
+        return SyncEngine(
+            drive_client=mock_drive,
+            git_manager=mock_git,
+            mirror_manager=mock_mirror,
+            classifier=mock_classifier,
+            state_file=state_file,
+            max_file_size_mb=0,
+        )
+
+    def test_full_scan_collects_folder_and_type_stats(self, engine, mock_drive, mock_git):
+        f1 = _make_drive_file(id="f1", name="photo.jpg", mime="image/jpeg", size=5000, parents=["p1"])
+        f2 = _make_drive_file(id="f2", name="doc.txt", mime="text/plain", size=1000, parents=["p2"])
+        mock_drive.list_all_files.return_value = iter([f1, f2])
+        mock_drive.get_start_page_token.return_value = "token1"
+        mock_drive.download_file.side_effect = [b"x" * 4800, b"y" * 950]
+        mock_drive.resolve_file_path.side_effect = ["Photos", "Docs"]
+
+        stats = engine.run_full_scan()
+
+        assert "Photos" in stats.folders
+        assert stats.folders["Photos"].file_count == 1
+        assert stats.folders["Photos"].drive_size_bytes == 5000
+        assert stats.file_types[".jpg"].count == 1
+        assert stats.file_types[".txt"].count == 1
+        assert stats.drive_total_bytes == 6000
+        assert stats.local_total_bytes == 4800 + 950
+
+    def test_full_scan_records_failures_with_reason(self, engine, mock_drive):
+        f1 = _make_drive_file(id="f1", name="big.mp4", size=200)
+        engine._max_file_size_bytes = 100
+        f2 = _make_drive_file(id="f2", name="secret.pdf", size=50)
+        mock_drive.list_all_files.return_value = iter([f1, f2])
+        mock_drive.get_start_page_token.return_value = "token1"
+        mock_drive.download_file.side_effect = HttpError(
+            resp=MagicMock(status=403), content=b"forbidden"
+        )
+        mock_drive.resolve_file_path.return_value = "Folder"
+
+        stats = engine.run_full_scan()
+
+        # f1 skipped (too large) — skip not failure
+        assert stats.skipped == 1
+        # f2 fails with permission denied
+        assert stats.failed == 1
+        assert len(stats.failures) == 1
+        assert stats.failures[0].reason == "permission_denied"
+
+    def test_full_scan_sets_end_time(self, engine, mock_drive):
+        mock_drive.list_all_files.return_value = iter([])
+        mock_drive.get_start_page_token.return_value = "token1"
+
+        stats = engine.run_full_scan()
+
+        assert stats.end_time is not None
+        assert stats.end_time >= stats.start_time
