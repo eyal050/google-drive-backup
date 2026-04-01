@@ -1,5 +1,6 @@
 """Unit tests for GithubManager — all HTTP calls are mocked."""
 import pytest
+import requests as req
 from unittest.mock import MagicMock, patch, call
 from gdrive_backup.github_manager import GithubManager, GithubError
 
@@ -36,6 +37,29 @@ class TestValidatePat:
     def test_server_error_raises(self, mgr):
         with patch.object(mgr._session, "get", return_value=_mock_response(500)):
             with pytest.raises(GithubError, match="500"):
+                mgr.validate_pat()
+
+
+class TestValidatePatEdgeCases:
+    def test_validate_pat_with_empty_string_raises(self):
+        """Empty PAT should fail validation."""
+        mgr = GithubManager(pat="", owner="alice", repo="backup")
+        with patch.object(mgr._session, "get", return_value=_mock_response(401)):
+            with pytest.raises(GithubError, match="Invalid PAT"):
+                mgr.validate_pat()
+
+    def test_validate_pat_network_error_raises(self):
+        """Network error during validation should raise."""
+        mgr = GithubManager(pat="test_pat", owner="alice", repo="backup")
+        with patch.object(mgr._session, "get", side_effect=req.ConnectionError("network down")):
+            with pytest.raises(req.ConnectionError):
+                mgr.validate_pat()
+
+    def test_validate_pat_timeout_raises(self):
+        """Timeout during validation should raise."""
+        mgr = GithubManager(pat="test_pat", owner="alice", repo="backup")
+        with patch.object(mgr._session, "get", side_effect=req.Timeout("timed out")):
+            with pytest.raises(req.Timeout):
                 mgr.validate_pat()
 
 
