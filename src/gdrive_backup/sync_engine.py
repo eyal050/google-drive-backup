@@ -216,6 +216,7 @@ class SyncEngine:
         max_file_size_mb: int = 0,
         include_shared: bool = False,
         folder_ids: Optional[list] = None,
+        quiet: bool = False,
     ):
         self._drive = drive_client
         self._git = git_manager
@@ -225,6 +226,7 @@ class SyncEngine:
         self._max_file_size_bytes = max_file_size_mb * 1024 * 1024 if max_file_size_mb > 0 else 0
         self._include_shared = include_shared
         self._folder_ids = folder_ids or []
+        self._quiet = quiet
         self._state: dict = {}
         self._file_cache: dict = {}
 
@@ -270,6 +272,24 @@ class SyncEngine:
             logger.error(f"Failed to get start page token: {e}")
             raise SyncError(f"Failed to get start page token from Drive API: {e}") from e
 
+        # Count files for progress tracking
+        total_files = 0
+        if not self._quiet:
+            try:
+                total_files = self._drive.count_files(
+                    include_shared=self._include_shared,
+                    folder_ids=self._folder_ids if self._folder_ids else None,
+                )
+                stats.total_files = total_files
+                logger.info(f"Total files to process: {total_files}")
+            except Exception as e:
+                logger.warning(f"Could not count files for progress display: {e}")
+
+        tracker = ProgressTracker(
+            total=total_files,
+            is_tty=sys.stderr.isatty() and not self._quiet,
+        ) if not self._quiet else None
+
         file_count = 0
         try:
             for drive_file in self._drive.list_all_files(
@@ -279,6 +299,8 @@ class SyncEngine:
                 file_count += 1
                 if drive_file.should_skip:
                     logger.debug(f"Skipping non-downloadable: {drive_file.name} ({drive_file.mime_type})")
+                    if tracker:
+                        tracker.update(drive_file.name)
                     continue
 
                 try:
@@ -302,11 +324,16 @@ class SyncEngine:
                         exc_info=True,
                     )
                     stats.failed += 1
+                if tracker:
+                    tracker.update(drive_file.name)
         except Exception as e:
             logger.error(f"Error listing files from Drive API after {file_count} files: {e}", exc_info=True)
             if file_count == 0:
                 raise SyncError(f"Failed to list any files from Drive API: {e}") from e
             logger.warning(f"Continuing with {file_count} files processed before error")
+
+        if tracker:
+            tracker.finish()
 
         # Commit all text file changes
         try:
