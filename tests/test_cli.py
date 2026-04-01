@@ -1,6 +1,7 @@
 # tests/test_cli.py
 """Tests for CLI commands."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
@@ -133,11 +134,11 @@ def test_init_github_prompts_saved_to_config(tmp_path):
         str(tmp_path / "repo"),   # git repo path
         str(tmp_path / "mirror"), # mirror path
         "y",               # enable github
+        "",                # PAT (blank = use env var)
         "alice",           # owner
         "my-backup",       # repo
         "y",               # private
         "y",               # auto_create
-        "",                # PAT (blank = use env var)
         "",                # extra trailing newline for input()
     ])
     result = runner.invoke(
@@ -319,3 +320,48 @@ def test_run_prints_rich_summary(tmp_path, fake_config_file):
     assert "My Drive/Photos" in result.output
     assert "Too large" in result.output or "too_large" in result.output
     assert "Permission denied" in result.output or "permission_denied" in result.output
+
+
+def test_init_shows_gcp_instructions(tmp_path):
+    """Init command shows GCP setup instructions."""
+    runner = CliRunner()
+    input_lines = "\n".join([
+        "oauth",
+        str(tmp_path / "creds.json"),
+        str(tmp_path / "repo"),
+        str(tmp_path / "mirror"),
+        "n",
+    ])
+    result = runner.invoke(
+        main, ["init", "--config", str(tmp_path / "config.yaml")],
+        input=input_lines,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "Google Cloud Console" in result.output or "Google Drive API" in result.output
+
+
+def test_init_validates_credentials_json(tmp_path):
+    """Init validates the credentials file is a Desktop app credential."""
+    web_cred = tmp_path / "web_creds.json"
+    web_cred.write_text(json.dumps({"web": {"client_id": "test"}}))
+
+    valid_cred = tmp_path / "valid_creds.json"
+    valid_cred.write_text(json.dumps({"installed": {"client_id": "test"}}))
+
+    runner = CliRunner()
+    input_lines = "\n".join([
+        "oauth",
+        str(web_cred),
+        str(valid_cred),
+        str(tmp_path / "repo"),
+        str(tmp_path / "mirror"),
+        "n",
+    ])
+    result = runner.invoke(
+        main, ["init", "--config", str(tmp_path / "config.yaml")],
+        input=input_lines,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert (tmp_path / "config.yaml").exists()

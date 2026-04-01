@@ -278,32 +278,112 @@ def _prompt_text(label: str, default: str = "") -> str:
     return value
 
 
+GCP_INSTRUCTIONS = """
+Google Cloud Console Setup
+==========================
+
+Before you can use gdrive-backup, you need Google OAuth credentials.
+Follow these steps (takes about 2 minutes):
+
+  1. Open the Google Cloud Console and create or select a project:
+     https://console.cloud.google.com/
+
+  2. Enable the Google Drive API:
+     https://console.cloud.google.com/apis/library/drive.googleapis.com
+     -> Click "Enable"
+
+  3. Create OAuth 2.0 credentials:
+     https://console.cloud.google.com/apis/credentials
+     -> Create Credentials -> OAuth client ID
+     -> Application type: Desktop app
+     -> Name it anything (e.g. "gdrive-backup")
+     -> Click Create, then Download JSON
+
+  4. Note the path to the downloaded file - you will enter it below.
+
+"""
+
+
+def _validate_credentials_json(path: Path) -> tuple:
+    """Validate a Google OAuth Desktop app credentials JSON file."""
+    if not path.exists():
+        return False, f"File not found: {path}"
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        return False, f"Invalid JSON: {e}"
+    if "installed" in data:
+        return True, ""
+    if "web" in data:
+        return False, (
+            "This is a Web application credential, not a Desktop app credential.\n"
+            "  Please create a new OAuth client ID with Application type: Desktop app"
+        )
+    if data.get("type") == "service_account":
+        return False, (
+            "This is a service account key, not an OAuth credential.\n"
+            "  Select 'service_account' as auth method for service account setup."
+        )
+    return False, "Unrecognized credentials format. Expected a Desktop app OAuth credential."
+
+
 @main.command()
 @click.option("--config", "config_path", default=None, help="Config file path")
 @click.pass_context
 def init(ctx, config_path):
     """Set up a new backup configuration."""
+    import shutil
+
     _enable_readline()
     control_dir = _resolve_control_dir(config_path)
     control_dir.mkdir(parents=True, exist_ok=True)
     (control_dir / "logs").mkdir(exist_ok=True)
 
-    config_path = control_dir / "config.yaml"
+    config_file = control_dir / "config.yaml"
 
-    if config_path.exists():
-        click.echo(f"Config already exists at {config_path}")
+    if config_file.exists():
+        click.echo(f"Config already exists at {config_file}")
         if not click.confirm("Overwrite?"):
             return
+
+    # Show GCP instructions
+    click.echo(GCP_INSTRUCTIONS)
 
     # Auth method
     auth_method = _prompt_text("Authentication method (oauth/service_account)", "oauth")
 
-    # Credentials file
-    creds_input = _prompt_path("Path to credentials JSON file", str(control_dir / "credentials.json"))
-    creds_path = Path(creds_input).expanduser()
+    # Credentials file with validation
+    creds_path = None
+    for attempt in range(3):
+        creds_input = _prompt_path(
+            "Path to credentials JSON file",
+            str(control_dir / "credentials.json"),
+        )
+        creds_path = Path(creds_input).expanduser()
 
-    if not creds_path.exists():
-        click.echo(f"Note: Place your credentials file at {creds_path}")
+        if not creds_path.exists():
+            click.echo(f"  Note: File not found at {creds_path}. You can place it there later.")
+            break
+
+        if auth_method == "oauth":
+            ok, error = _validate_credentials_json(creds_path)
+            if ok:
+                dest = control_dir / "credentials.json"
+                if creds_path.resolve() != dest.resolve():
+                    shutil.copy2(creds_path, dest)
+                    dest.chmod(0o600)
+                    click.echo(f"  Credentials copied to {dest}")
+                creds_path = dest
+                break
+            else:
+                click.echo(f"  Error: {error}")
+                if attempt < 2:
+                    click.echo("  Please try again.\n")
+        else:
+            break
+    else:
+        click.echo("  Too many failed attempts. You can place the credentials file manually.")
+        creds_path = control_dir / "credentials.json"
 
     # Backup paths
     git_repo_path = _prompt_path("Git repo path (for text files)", str(Path.home() / "gdrive-backup-repo"))
@@ -341,21 +421,23 @@ def init(ctx, config_path):
     # GitHub setup
     github_data = None
     if click.confirm("\nEnable GitHub push?", default=False):
-        gh_owner = _prompt_text("  GitHub owner (user or org)")
-        gh_repo = _prompt_text("  Repository name")
-        gh_private = click.confirm("  Private repo?", default=True)
-        gh_auto_create = click.confirm("  Auto-create if missing?", default=True)
         gh_pat = _prompt_text("  GitHub PAT (leave blank to use GITHUB_PAT env var)")
 
         if gh_pat:
+            click.echo("  Validating PAT...")
             try:
-                mgr = GithubManager(gh_pat, gh_owner, gh_repo, gh_private, gh_auto_create)
-                mgr.validate_pat()
+                temp_mgr = GithubManager(gh_pat, "test", "test")
+                temp_mgr.validate_pat()
                 click.echo("  PAT validated successfully.")
             except GithubError as e:
                 click.echo(f"  Warning: PAT validation failed: {e}")
-                if not click.confirm("  Save anyway?", default=False):
+                if not click.confirm("  Continue anyway?", default=False):
                     gh_pat = ""
+
+        gh_owner = _prompt_text("  GitHub owner (user or org)")
+        gh_repo = _prompt_text("  Repository name", "gdrive-backup-data")
+        gh_private = click.confirm("  Private repo?", default=True)
+        gh_auto_create = click.confirm("  Auto-create if missing?", default=True)
 
         github_data = {
             "enabled": True,
@@ -369,9 +451,9 @@ def init(ctx, config_path):
     if github_data:
         config_data["github"] = github_data
 
-    with open(config_path, "w") as f:
+    with open(config_file, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False)
-    os.chmod(config_path, 0o600)
+    os.chmod(config_file, 0o600)
 
     # Initialize git repo
     git_path = Path(git_repo_path).expanduser()
@@ -381,7 +463,7 @@ def init(ctx, config_path):
     Path(mirror_path).expanduser().mkdir(parents=True, exist_ok=True)
 
     click.echo(f"\nSetup complete!")
-    click.echo(f"  Config: {config_path}")
+    click.echo(f"  Config: {config_file}")
     click.echo(f"  Git repo: {git_path}")
     click.echo(f"  Mirror: {mirror_path}")
     click.echo(f"\nTo start your first backup, run: gdrive-backup run")

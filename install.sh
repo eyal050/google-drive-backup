@@ -5,7 +5,6 @@ set -euo pipefail
 
 REPO="eyal050/google-drive-backup"
 BRANCH="main"
-SETUP_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/scripts/setup.py"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 BOLD='\033[1m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; RESET='\033[0m'
@@ -85,19 +84,6 @@ except Exception:
     echo "$ver"
 }
 
-# ── Download helper ───────────────────────────────────────────────────────────
-download_file() {
-    local url="$1" dest="$2"
-    if command -v curl &>/dev/null; then
-        curl -sSL --connect-timeout 10 --max-time 60 "$url" -o "$dest"
-    else
-        python3 - "$url" "$dest" <<'EOF'
-import sys, urllib.request
-urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
-EOF
-    fi
-}
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 echo ""
 info "gdrive-backup installer"
@@ -158,11 +144,7 @@ fi
 
 echo ""
 
-# ── Download and run setup wizard ────────────────────────────────────────────
-SETUP_TMP=$(mktemp /tmp/gdrive-setup.XXXXXX.py)
-trap 'rm -f "$SETUP_TMP"' EXIT
-
-info "Downloading setup wizard..."
-download_file "$SETUP_URL" "$SETUP_TMP"
-
-python3 "$SETUP_TMP" </dev/tty
+# ── Launch configuration wizard ─────────────────────────────────────────────
+info "Launching configuration wizard..."
+echo ""
+gdrive-backup init </dev/tty
